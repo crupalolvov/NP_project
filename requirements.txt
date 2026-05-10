@@ -1,0 +1,7 @@
+opencv-python
+mediapipe
+PyQt5
+pyqtgraph
+numpy
+scipy
+pylsl
