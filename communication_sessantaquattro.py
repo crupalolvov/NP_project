@@ -53,7 +53,7 @@ def create_bin_command(start=1):
     ext = 0
     hpf = 1     # 1 = Filtro Passa-Alto attivo (raccomandato per i segnali EMG)
     hres = 0    # 0 = Risoluzione standard a 16-bit
-    mode = 1    # 1 = Modalità Bipolare/Differenziale
+    mode = 0    # 1 = Modalità Bipolare/Differenziale
     nch = 0     # 0 = Configurazione minima del buffer (trasmette 8 canali)
     fsamp = 2   # 2 = 2000 Hz
     getset = 0
