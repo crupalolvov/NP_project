@@ -50,7 +50,7 @@ class Track:
 
         self.plot_widget = pg.PlotWidget(title=self.title)
         self.plot_widget.setXRange(0, self.plot_time)
-        self.plot_widget.setYRange(-5000, 5000)  # Range fisso a +- 5 mV (+- 5000 µV)
+        self.plot_widget.setYRange(-3500, 3500)  # Range fisso a +- 5 mV (+- 5000 µV)
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setLabel('left', 'Amplitude', units='µV' if 'EMG' in title else 'A.U.')
         self.plot_widget.getViewBox().setBackgroundColor((30, 30, 30))
@@ -83,7 +83,7 @@ class DataReceiverThread(QtCore.QThread):
         self.sample_freq = sample_freq
         self.running = True
         
-        self.active_bio_channels = 12
+        self.active_bio_channels =8
         self.processor = EMGProcessor(fs=self.sample_freq)
         self.lsl_outlet = StreamOutlet(StreamInfo('Sessantaquattro_EMG', 'EMG', 
                                                   self.active_bio_channels, self.sample_freq, 
@@ -158,8 +158,8 @@ class SoundtrackGUI(QtWidgets.QWidget):
         self.thread.start()
 
     def init_tracks(self):
-        # Mostriamo tutti i 12 canali
-        t_info = [(f"Canale {i+1}", 1, 0, 1.0) for i in range(12)]
+        # Mostriamo tutti i 8 canali
+        t_info = [(f"Canale {i+1}", 1, 0, 1.0) for i in range(8)]
         
         for title, n, off, conv in t_info:
             t = Track(title, self.sample_freq, n, off, conv, self.plot_time)
@@ -168,7 +168,7 @@ class SoundtrackGUI(QtWidgets.QWidget):
             self.scroll_layout.addWidget(t.plot_widget)
 
     def on_data(self, data):
-        for i in range(12):
+        for i in range(8):
             self.tracks[i].feed(data[i:i+1, :])
 
     def update_plot(self):
@@ -180,12 +180,22 @@ class SoundtrackGUI(QtWidgets.QWidget):
         self.thread.wait()
         communication.disconnect_from_sq(self.connection)
         event.accept()
+        # --- AGGIUNGI QUESTO BLOCCO ---
+        if hasattr(self, 'server_socket'):
+            try:
+                self.server_socket.shutdown(socket.SHUT_RDWR)
+                self.server_socket.close()
+            except Exception:
+                pass
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
     pg.setConfigOptions(antialias=True)
     
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # --- AGGIUNGI QUESTA RIGA PER IL REUSE DELL'INDIRIZZO ---
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # --------------------------------------------------------
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     
     cmd, nch, fs, bis = communication.create_bin_command(start=1)
@@ -194,6 +204,9 @@ def main():
     try:
         conn = communication.connect_to_sq(sock, '0.0.0.0', 45454, cmd)
         win = SoundtrackGUI(conn, nch, fs, bis)
+        # --- AGGIUNGI QUESTA RIGA PER PASSARE IL SERVER SOCKET ALLA GUI ---
+        win.server_socket = sock
+        # ------------------------------------------------------------------
         win.show()
         sys.exit(app.exec_())
     except Exception as e:
