@@ -24,7 +24,7 @@ class EMGProcessor:
         nyq = self.fs / 2
         
         self.sos_band = butter(4, [20, min(450, nyq - 5)], btype='band', fs=fs, output='sos')
-        self.notches = [iirnotch(freq, 30, fs=fs) for freq in [50,60, 100, 150] if freq < nyq]
+        self.notches = [iirnotch(freq, 30, fs=fs) for freq in [50, 100, 150, 250, 350, 450] if freq < nyq]
         
         self.zi_sos = None
         self.zi_notches = None
