@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from pylsl import StreamInfo, StreamOutlet
-from angles_kalman import SimpleKalmanFilter
+from angles_kalman_offline import SimpleKalmanFilter
 
 # 21 landmark * 3 coordinates (x, y, z) = 63 channels
 LSL_CHANNELS = 63
