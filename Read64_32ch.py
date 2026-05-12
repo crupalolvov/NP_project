@@ -8,6 +8,10 @@ import pyqtgraph as pg
 from scipy.signal import butter, lfilter, iirnotch, sosfilt
 from pylsl import StreamInfo, StreamOutlet
 import communication_sessantaquattro as communication
+import time
+import datetime
+import pandas as pd
+import threading
 
 class Config:
     DEFAULT_PLOT_TIME = 1      
@@ -54,7 +58,7 @@ class Track:
         if self.num_channels > 1:
             self.plot_widget.setYRange(-self.offset, self.num_channels * self.offset)
         else:
-            self.plot_widget.setYRange(-5000, 5000)
+            self.plot_widget.setYRange(-3000, 3000)
             
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setLabel('left', 'Amplitude', units='µV' if 'EMG' in title else 'A.U.')
@@ -89,9 +93,46 @@ class DataReceiverThread(QtCore.QThread):
         
         self.active_bio_channels = 32
         self.processor = EMGProcessor(fs=self.sample_freq)
-        self.lsl_outlet = StreamOutlet(StreamInfo('Sessantaquattro_EMG', 'EMG', 
+        self.lsl_outlet = StreamOutlet(StreamInfo('OTB_S64_EMG', 'EMG', 
                                                   self.active_bio_channels, self.sample_freq, 
                                                   'float32', 's64_pisa'))
+
+        # Variabili per la registrazione
+        self.is_recording = False
+        self.recorded_data = []
+        self.enable_preprocessing = False  # Flag per sospendere il preprocessing dei segnali
+
+    def toggle_recording(self):
+        if not self.is_recording:
+            self.recorded_data = []
+            self.is_recording = True
+            return "Registrazione avviata..."
+        else:
+            self.is_recording = False
+            data_to_save = self.recorded_data
+            self.recorded_data = []
+            
+            if data_to_save:
+                timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"session_Read32_{timestamp_str}_EMG.csv"
+                
+                def save_data(data, fname):
+                    all_times = np.concatenate([d[0] for d in data])
+                    all_channels = np.concatenate([d[1] for d in data], axis=1)
+                    cols = [f"EMG_{i+1}" for i in range(self.active_bio_channels)]
+                    df = pd.DataFrame(all_channels.T, columns=cols)
+                    df.insert(0, "Timestamp", all_times)
+                    df.to_csv(fname, index=False)
+                    self.status_update.emit(f"Registrazione completata e salvata in {fname}")
+                
+                threading.Thread(target=save_data, args=(data_to_save, filename)).start()
+                return f"Salvataggio in corso in {filename}..."
+            return "Registrazione interrotta (nessun dato)"
+
+    def toggle_preprocessing(self):
+        self.enable_preprocessing = not self.enable_preprocessing
+        stato = "ATTIVATO" if self.enable_preprocessing else "DISATTIVATO"
+        return f"Preprocessing {stato}", self.enable_preprocessing
 
     def run(self):
         chunk_size = max(1, int(self.sample_freq / 60))
@@ -114,22 +155,33 @@ class DataReceiverThread(QtCore.QThread):
                     
                     # --- APPLICAZIONE DEL FILTRO SPAZIALE CAR ---
                     # Calcola il rumore di modo comune (media lungo l'asse dei canali)
-                    common_mode_noise = np.mean(raw_channels, axis=0)
+                    # common_mode_noise = np.mean(raw_channels, axis=0)
                     
-                    # Sottrae il rumore globale da tutti i 32 canali contemporaneamente
-                    raw_channels_car = raw_channels - common_mode_noise
+                    # # Sottrae il rumore globale da tutti i 32 canali contemporaneamente
+                    # raw_channels_car = raw_channels - common_mode_noise
                     # --------------------------------------------
                     
                     # 2. Conversione in microVolt e Filtraggio (Passa-banda + Notch)
                     # Usiamo i dati appena "puliti" dal filtro CAR
-                    channels_uv = raw_channels_car * 0.2861
-                    channels_filtered = self.processor.process(channels_uv)
+                    channels_uv = raw_channels * 0.2861
+                    
+                    if self.enable_preprocessing:
+                        final_data = self.processor.process(channels_uv)
+                    else:
+                        final_data = channels_uv
+
+                    # Accumulo dei dati se la registrazione è attiva
+                    if self.is_recording:
+                        current_chunk_size = final_data.shape[1]
+                        current_time = time.time()
+                        times = np.linspace(current_time - current_chunk_size/self.sample_freq, current_time, current_chunk_size, endpoint=False)
+                        self.recorded_data.append((times, final_data.copy()))
 
                     # 3. Stream su LSL dei canali puliti
-                    self.lsl_outlet.push_chunk(channels_filtered.T.astype(np.float32).tolist())
+                    self.lsl_outlet.push_chunk(final_data.T.astype(np.float32).tolist())
 
                     # 4. Preparazione dati per i grafici
-                    self.data_received.emit(channels_filtered)
+                    self.data_received.emit(final_data)
 
             except Exception as e:
                 self.status_update.emit(f"Errore: {e}")
@@ -170,6 +222,14 @@ class SoundtrackGUI(QtWidgets.QWidget):
         self.instructions_label.setStyleSheet("font-weight: bold; color: #555555;")
         layout.addWidget(self.instructions_label)
         
+        self.record_instructions_label = QtWidgets.QLabel("Premi il tasto 'R' per avviare/fermare la registrazione su CSV")
+        self.record_instructions_label.setStyleSheet("font-weight: bold; color: #555555;")
+        layout.addWidget(self.record_instructions_label)
+        
+        self.prep_instructions_label = QtWidgets.QLabel("Premi il tasto 'P' per attivare/disattivare i filtri (Preprocessing: DISATTIVATO)")
+        self.prep_instructions_label.setStyleSheet("font-weight: bold; color: #555555;")
+        layout.addWidget(self.prep_instructions_label)
+        
         # Finestra separata per i plot singoli
         self.single_plots_window = QtWidgets.QWidget()
         self.single_plots_window.setWindowTitle("Sessantaquattro - Plot Singoli (32 Canali)")
@@ -201,6 +261,24 @@ class SoundtrackGUI(QtWidgets.QWidget):
         self.shortcut_s = QtWidgets.QShortcut("S", self)
         self.shortcut_s.setContext(QtCore.Qt.ApplicationShortcut)
         self.shortcut_s.activated.connect(self.toggle_single_plots)
+
+        self.shortcut_r = QtWidgets.QShortcut("R", self)
+        self.shortcut_r.setContext(QtCore.Qt.ApplicationShortcut)
+        self.shortcut_r.activated.connect(self.toggle_recording)
+
+        self.shortcut_p = QtWidgets.QShortcut("P", self)
+        self.shortcut_p.setContext(QtCore.Qt.ApplicationShortcut)
+        self.shortcut_p.activated.connect(self.toggle_preprocessing)
+
+    def toggle_recording(self):
+        msg = self.thread.toggle_recording()
+        self.status_label.setText(msg)
+
+    def toggle_preprocessing(self):
+        msg, is_enabled = self.thread.toggle_preprocessing()
+        self.status_label.setText(msg)
+        stato = "ATTIVATO" if is_enabled else "DISATTIVATO"
+        self.prep_instructions_label.setText(f"Premi il tasto 'P' per attivare/disattivare i filtri (Preprocessing: {stato})")
 
     def init_tracks(self):
         # Mostriamo tutti i 32 canali
