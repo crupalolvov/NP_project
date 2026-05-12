@@ -3,7 +3,7 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 
-# FILTRO DI KALMAN (1D)
+# KALMAN FILTER (1D)
 
 class SimpleKalmanFilter:
     def __init__(self, process_variance, measurement_variance, initial_value=0.0):
@@ -13,14 +13,13 @@ class SimpleKalmanFilter:
         self.error_covariance = 1.0
 
     def update(self, measurement):
-        # Predizione
+        # Prediction
         priori_estimate = self.estimated_value
         priori_error_covariance = self.error_covariance + self.process_variance
 
         # Kalman Gain
         kalman_gain = priori_error_covariance / (priori_error_covariance + self.measurement_variance)
 
-        # Aggiornamento
         self.estimated_value = priori_estimate + kalman_gain * (measurement - priori_estimate)
         self.error_covariance = (1 - kalman_gain) * priori_error_covariance
 
@@ -29,10 +28,8 @@ class SimpleKalmanFilter:
 # UTILITIES 
 
 def calculate_angle_3d(p1, p2, p3):
-    """
-    Calcola l'angolo 3D tra tre punti (p1, p2, p3).
-    p2 è il vertice dell'angolo (il giunto).
-    """
+
+    "3D angles (p1, p2, p3)"
     v1 = p1 - p2
     v2 = p3 - p2
     
@@ -49,10 +46,8 @@ def calculate_angle_3d(p1, p2, p3):
 
 
 def plot_kalman_comparison(df, joint_name):
-    """Genera un grafico sovrapposto tra dati grezzi e filtrati."""
     plt.figure(figsize=(12, 6))
     
-    # Se la colonna del tempo base non c'è, usiamo l'indice
     x_axis = df['Timestamp_LSL'] if 'Timestamp_LSL' in df.columns else df.index
     
     plt.plot(x_axis, df[f'{joint_name}_Raw'], 
@@ -73,10 +68,9 @@ def plot_kalman_comparison(df, joint_name):
 
 def process_kinematics(csv_input_path, joint_to_plot="Index_PIP"):
     if not os.path.exists(csv_input_path):
-        print(f"Errore: Il file {csv_input_path} non esiste.")
+        print(f"Error: {csv_input_path} file doesn't exist.")
         return
         
-    print(f"Caricamento dati da: {csv_input_path}")
     df = pd.read_csv(csv_input_path)
     
     joints = [
@@ -88,8 +82,8 @@ def process_kinematics(csv_input_path, joint_to_plot="Index_PIP"):
     ]
     
     # SETUP PARAMETERS
-    Q = 1e-2  # Varianza del processo (reattività ai movimenti veri)
-    R = 1e-1  # Varianza della misurazione (capacità di filtrare il rumore)
+    Q = 1e-2  # Process variance (responsiveness to real movements)
+    R = 1e-1  #Measurement variance (noise filtering)
     
     kalman_filters = {
         joint_name: SimpleKalmanFilter(process_variance=Q, measurement_variance=R) 
@@ -129,10 +123,9 @@ def process_kinematics(csv_input_path, joint_to_plot="Index_PIP"):
     
     # Plot
     if f"{joint_to_plot}_Raw" in angles_df.columns:
-        print(f"Generazione del grafico per l'articolazione: {joint_to_plot}...")
         plot_kalman_comparison(angles_df, joint_to_plot)
     else:
-        print(f"Impossibile creare il grafico: il giunto '{joint_to_plot}' non esiste.")
+        print(f"Impossible: '{joint_to_plot}' joint doesn't exist.")
 
 if __name__ == "__main__":
 
