@@ -1,4 +1,4 @@
-#!python3
+
 import sys
 import numpy as np
 import socket
@@ -153,17 +153,14 @@ class DataReceiverThread(QtCore.QThread):
                     # 1. Estrazione di tutti i 32 canali EMG
                     raw_channels = reshaped[:self.active_bio_channels, :]
                     
-                    # --- APPLICAZIONE DEL FILTRO SPAZIALE CAR ---
-                    # Calcola il rumore di modo comune (media lungo l'asse dei canali)
+                    # --- APPLICAZIONE DEL FILTRO SPAZIALE  ---
                     # common_mode_noise = np.mean(raw_channels, axis=0)
                     
-                    # # Sottrae il rumore globale da tutti i 32 canali contemporaneamente
                     # raw_channels_car = raw_channels - common_mode_noise
                     # --------------------------------------------
                     
                     # 2. Conversione in microVolt e Filtraggio (Passa-banda + Notch)
-                    # Usiamo i dati appena "puliti" dal filtro CAR
-                    channels_uv = raw_channels * 0.2861
+                    channels_uv = raw_channels * 0.2861 # LSB 286.1 nV
                     
                     if self.enable_preprocessing:
                         final_data = self.processor.process(channels_uv)
@@ -196,7 +193,7 @@ class MultiplotWindow(QtWidgets.QWidget):
         self.setGeometry(150, 150, *Config.WINDOW_SIZE)
         layout = QtWidgets.QVBoxLayout(self)
         
-        # Sfasamento di 2000 µV per separare bene le linee
+        # Sfasamento di 2 mV per separare bene le linee
         self.track = Track("Multiplot 32 Canali", sample_freq, num_channels, offset=2000, conv_fact=1.0, plot_time=plot_time)
         layout.addWidget(self.track.plot_widget)
 
@@ -333,9 +330,7 @@ def main():
     pg.setConfigOption('foreground', 'k')
     
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # --- AGGIUNGI QUESTA RIGA PER IL REUSE DELL'INDIRIZZO ---
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    # --------------------------------------------------------
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     
     cmd, nch, fs, bis = communication.create_bin_command(start=1)
@@ -344,9 +339,8 @@ def main():
     try:
         conn = communication.connect_to_sq(sock, '0.0.0.0', 45454, cmd)
         win = SoundtrackGUI(conn, nch, fs, bis)
-        # --- AGGIUNGI QUESTA RIGA PER PASSARE IL SERVER SOCKET ALLA GUI ---
+        # --- SERVER SOCKET ALLA GUI ---
         win.server_socket = sock
-        # ------------------------------------------------------------------
         win.show()
         sys.exit(app.exec_())
     except Exception as e:
