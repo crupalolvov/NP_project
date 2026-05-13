@@ -4,18 +4,14 @@ import time
 import numpy as np
 from pylsl import StreamInfo, StreamOutlet
 
-# ==========================================
 # 1. SETUP LAB STREAMING LAYER (LSL)
-# ==========================================
 # 21 landmark * 3 coordinate (x, y, z) = 63 canali continui
 LSL_CHANNELS = 63
 LSL_FPS = 0 # 0 indica un rate irregolare (dipende dai frame elaborati dalla webcam)
 info = StreamInfo('MediaPipe_Kinematics', 'Kinematics', LSL_CHANNELS, LSL_FPS, 'float32', 'mediapipe_hand_01')
 outlet = StreamOutlet(info)
 
-# ==========================================
 # 2. SETUP MEDIAPIPE HAND LANDMARKER
-# ==========================================
 BaseOptions = mp.tasks.BaseOptions
 HandLandmarker = mp.tasks.vision.HandLandmarker
 HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
@@ -25,7 +21,6 @@ VisionRunningMode = mp.tasks.vision.RunningMode
 latest_landmarks = None
 
 def update_result(result, output_image, timestamp_ms):
-    """Callback asincrona: estrae le coordinate 3D e le invia via LSL."""
     global latest_landmarks
     
     if result.hand_landmarks:
@@ -44,7 +39,7 @@ def update_result(result, output_image, timestamp_ms):
         # Push del campione in rete
         outlet.push_sample(flattened_coords, lsl_timestamp)
 
-# Configurazione (Assicurati di avere il file .task scaricato nella directory)
+# Configurazione (file .task scaricato nella directory)
 # Link per il download: https://developers.google.com/mediapipe/solutions/vision/hand_landmarker/index#models
 options = HandLandmarkerOptions(
     base_options=BaseOptions(model_asset_path='hand_landmarker.task'),
@@ -54,9 +49,7 @@ options = HandLandmarkerOptions(
     min_hand_detection_confidence=0.5,
     min_tracking_confidence=0.5)
 
-# ==========================================
-# 3. UTILITIES PER CINEMATICA (FASE 2 OFFLINE)
-# ==========================================
+
 def calculate_joint_angle(p1, p2, p3):
     """
     Calcola l'angolo 3D tra tre punti (es. nocca, articolazione, punta).
@@ -75,7 +68,6 @@ def calculate_joint_angle(p1, p2, p3):
     angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
     return np.degrees(angle)
 
-# ==========================================
 # 4. MAIN LOOP OPENCV
 # ==========================================
 cap = cv2.VideoCapture(1)
