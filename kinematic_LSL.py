@@ -1,7 +1,11 @@
+# WRIST MUST BE STEADY IN SPACE!! (ok rotations, but no translations)
+
 import cv2
 import mediapipe as mp
 import time
 import numpy as np
+import pandas as pd
+import datetime
 from pylsl import StreamInfo, StreamOutlet
 
 # 1. SETUP LAB STREAMING LAYER (LSL)
@@ -19,9 +23,14 @@ VisionRunningMode = mp.tasks.vision.RunningMode
 
 # Variabili globali per mantenere lo stato
 latest_landmarks = None
+is_recording = False
+recording_data = []
+recording_start_time = 0
+status_message = ""
+status_message_display_time = 0
 
 def update_result(result, output_image, timestamp_ms):
-    global latest_landmarks
+    global latest_landmarks, is_recording, recording_data
     
     if result.hand_landmarks:
         # Per questo setup, estraiamo i dati della prima mano rilevata
@@ -39,6 +48,10 @@ def update_result(result, output_image, timestamp_ms):
         # Push del campione in rete
         outlet.push_sample(flattened_coords, lsl_timestamp)
 
+        # Se la registrazione è attiva, salva i dati
+        if is_recording:
+            recording_data.append([lsl_timestamp] + flattened_coords)
+
 # Configurazione (file .task scaricato nella directory)
 # Link per il download: https://developers.google.com/mediapipe/solutions/vision/hand_landmarker/index#models
 options = HandLandmarkerOptions(
@@ -49,6 +62,29 @@ options = HandLandmarkerOptions(
     min_hand_detection_confidence=0.5,
     min_tracking_confidence=0.5)
 
+def save_recording():
+    """Salva i dati cinematici registrati in un file CSV."""
+    global recording_data, status_message, status_message_display_time
+    if not recording_data:
+        status_message = "Nessun dato da salvare."
+        status_message_display_time = time.time()
+        return
+
+    # Creazione delle colonne per il DataFrame
+    columns = ["Timestamp_LSL"]
+    for i in range(21):  # 21 landmark
+        columns.extend([f"LM_{i}_X", f"LM_{i}_Y", f"LM_{i}_Z"])
+    
+    df = pd.DataFrame(recording_data, columns=columns)
+
+    # Generazione del nome file e salvataggio
+    timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"kinematics_recording_{timestamp_str}.csv"
+    df.to_csv(filename, index=False)
+    
+    status_message = f"Salvato in: {filename}"
+    status_message_display_time = time.time()
+    recording_data = []
 
 def calculate_joint_angle(p1, p2, p3):
     """
@@ -74,6 +110,8 @@ cap = cv2.VideoCapture(1)
 prev_frame_time = 0
 
 print("Avvio streaming LSL 'MediaPipe_Kinematics'...")
+print("Premi 'R' per avviare/fermare la registrazione.")
+print("Premi 'Q' per uscire.")
 
 with HandLandmarker.create_from_options(options) as landmarker:
     while cap.isOpened():
@@ -82,6 +120,21 @@ with HandLandmarker.create_from_options(options) as landmarker:
             break
 
         frame = cv2.flip(frame, 1)
+
+        # Gestione input da tastiera
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+        if key == ord('r'):
+            is_recording = not is_recording
+            if is_recording:
+                recording_data = []
+                recording_start_time = time.time()
+                status_message = "REC INIZIATA"
+                status_message_display_time = time.time()
+            else:
+                save_recording()
+
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
         
@@ -106,11 +159,28 @@ with HandLandmarker.create_from_options(options) as landmarker:
         cv2.putText(frame, f"FPS: {int(fps)} | LSL Streaming", (10, 30), 
                     cv2.FONT_HERSHEY_DUPLEX, 0.7, (0, 255, 0), 2)
 
+        # Visualizzazione dello stato della registrazione e del cronometro
+        if is_recording:
+            elapsed_time = time.time() - recording_start_time
+            timer_text = f"REC ● {int(elapsed_time // 60):02d}:{int(elapsed_time % 60):02d}"
+            cv2.putText(frame, timer_text, (10, 60), 
+                        cv2.FONT_HERSHEY_DUPLEX, 0.7, (0, 0, 255), 2)
+        else:
+            # Mostra un messaggio di stato (es. "Salvato" o "Premi R")
+            if time.time() - status_message_display_time < 4:
+                cv2.putText(frame, status_message, (10, 60), 
+                            cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 255, 255), 2)
+            else:
+                cv2.putText(frame, "Premi 'R' per registrare", (10, 60), 
+                            cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 255, 255), 2)
+
         cv2.imshow('MediaPipe Kinematics LSL', frame)
-        
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
 
 cap.release()
 cv2.destroyAllWindows()
 print("Streaming terminato.")
+
+# Se si esce con la registrazione attiva, salva i dati raccolti
+if is_recording and recording_data:
+    print("Salvataggio della registrazione residua in corso...")
+    save_recording()
