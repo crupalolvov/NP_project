@@ -75,6 +75,9 @@ def run_offline_inference(emg_csv_path, model_path, output_csv_path):
     
     start_time = time.time()
     
+    # Dimensione della finestra in sample (0.78s * 81.92Hz = ~64 sample)
+    WINDOW_SIZE = 64
+    
     # 5. Loop di Simulazione Temporale
     for i in range(num_samples):
         # Acquisizione del dato "corrente" dal dataset
@@ -83,6 +86,12 @@ def run_offline_inference(emg_csv_path, model_path, output_csv_path):
         # Aggiornamento buffer EMG
         emg_buffer = np.roll(emg_buffer, shift=-1, axis=0)
         emg_buffer[-1, :] = current_emg_rms
+        
+        # "The initial 0.78 s of a session may not be used [...] due to the absence of sufficient earlier data."
+        if i < WINDOW_SIZE:
+            # Riempiamo l'output con zeri per mantenere allineati i timestamp di LSL
+            predicted_kinematics.append(np.zeros(24))
+            continue
         
         # Sottocampionamento per la rete (Feature Extraction Spaziale e Inerziale)
         emg_input = emg_buffer[::4, :].flatten()
