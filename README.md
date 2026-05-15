@@ -1,43 +1,43 @@
 # 🦾 NP_project: HD-EMG & Kinematics Acquisition Pipeline
 
-Benvenuto in **NP_project** (Neural Prostheses Project). Questa repository contiene una suite software avanzata per l'acquisizione sincronizzata, il filtraggio in tempo reale e l'elaborazione offline di segnali EMG a media densità (MD-EMG) e dati cinematici della mano. 
+Benvenuto in **NP_project** (Neural Prostheses Project). Questa repository contiene una suite software per l'acquisizione sincronizzata, il filtraggio in tempo reale e l'elaborazione offline di segnali EMG a media densità (MD-EMG) e dati cinematici della mano. 
 
-Il sistema è concepito per la ricerca nell'ambito delle **Protesi Neurali**, con l'obiettivo ultimo di fornire dataset multimodali di altissima qualità necessari per l'addestramento di modelli di **regressione continua**. Tali modelli permetteranno di decodificare i pattern mioelettrici e tradurli in coordinate spaziali 3D (o angoli articolari), garantendo un controllo proporzionale e naturale degli attuatori bionici / prototipi virtuali.
+Il sistema è concepito per la ricerca nell'ambito delle **Protesi Neurali**, con l'obiettivo ultimo di fornire dataset multimodali necessari per l'addestramento di modelli di **regressione continua**. Tali modelli permetteranno di decodificare i pattern mioelettrici e tradurli in coordinate spaziali 3D (o angoli articolari), garantendo un controllo proporzionale e naturale degli attuatori bionici / prototipi virtuali.
 
 ---
 
 ## 🎯 Architettura del Sistema
 
-L'infrastruttura di acquisizione sfrutta il protocollo **LSL (Lab Streaming Layer)** per gestire il time-stamping ad alta precisione e risolvere nativamente il problema della sincronizzazione tra flussi di dati eterogenei e a frequenze di campionamento asimmetriche (es. EMG a 2000 Hz vs Webcam a ~30 Hz).
+L'infrastruttura di acquisizione sfrutta il protocollo **LSL (Lab Streaming Layer)** per gestire il time-stamping e risolvere la sincronizzazione tra flussi di dati eterogenei con frequenze di campionamento asimmetriche (es. EMG a 2000 Hz vs Webcam a ~30 Hz).
 
 La pipeline si articola nei seguenti moduli core:
 
 ### 1. 📡 Acquisizione e Filtraggio HD-EMG (`Read64_32ch.py` & `communication_sessantaquattro.py`)
-Questi moduli gestiscono l'interfacciamento TCP/IP a basso livello con il dispositivo **OTBioelettronica Sessantaquattro**. Implementano una robusta elaborazione del segnale digitale in tempo reale:
-- **Protocollo di Comunicazione:** Decodifica esatta dei pacchetti binari del dispositivo per l'estrazione di 32 canali attivi.
-- **Filtraggio IIR:** Implementazione di un passa-banda (20-450 Hz) in cascata strutturato in *Second-Order Sections* (SOS) per garantire stabilità matematica , unito a una batteria di filtri Notch (50, 100, 150 Hz) per l'abbattimento delle interferenze di rete.
-- **Interfaccia Grafica (GUI):** Visualizzazione multi-thread ad alte prestazioni basata su `PyQt5` e `pyqtgraph`. Include una vista *Multiplot* unificata e viste a *Canale Singolo* (attivabili premendo `S`).
+Questi moduli gestiscono l'interfacciamento TCP/IP con il dispositivo **OTBioelettronica Sessantaquattro**, occupandosi dell'elaborazione del segnale digitale in tempo reale:
+- **Protocollo di Comunicazione:** Decodifica dei pacchetti binari del dispositivo per l'estrazione di 32 canali attivi.
+- **Filtraggio IIR:** Implementazione di un filtro passa-banda (10-450 Hz) strutturato in *Second-Order Sections* (SOS), unito a una batteria di filtri Notch (50, 100, 150, 200, 250 Hz) per l'abbattimento delle interferenze di rete.
+- **Interfaccia Grafica (GUI):** Visualizzazione multi-thread basata su `PyQt5` e `pyqtgraph`. Include una vista *Multiplot* unificata e viste a *Canale Singolo* (attivabili premendo `S`).
 - **Streaming LSL:** Immette nella rete locale i segnali bioelettrici puliti (`OTB_S64_EMG`).
 
-> *Nota:* Oltre a `Read64_32ch.py`, la suite include `Read64_2ch.py` (per setup a canali ridotti).
+> *Nota:* Oltre a `Read64_32ch.py`, la suite include `Read64_2ch.py` (per setup a canali ridotti, configurato per 8 canali attivi).
 
-### 2. 📷 Estrazione Cinematica (`kinematic_LSL.py`)
-Sfrutta la Computer Vision e i modelli predittivi di **Google MediaPipe** per l'inferenza spaziale:
+### 2. 📷 Estrazione Cinematica (`kinematic_LSL.py` & `kinematics_online_kalman.py`)
+Sfrutta la Computer Vision e i modelli di **Google MediaPipe** per l'estrazione delle coordinate:
 - **Acquisizione:** Elabora il feed video della webcam in tempo reale (asincrono).
 - **Estrazione:** Identifica le topologie della mano ricavando le coordinate 3D dei 21 landmark anatomici.
-- **Streaming LSL:** Trasmette in rete un array in flattening di 63 feature (X, Y, Z per ogni giunto) sotto l'identificativo `MediaPipe_Kinematics`.
+- **Filtro Online (opzionale):** Tramite lo script `kinematics_online_kalman.py` è possibile applicare un filtro di Kalman sulle coordinate prima dell'invio in rete.
+- **Streaming LSL:** Trasmette in rete un array 1D di 63 feature (X, Y, Z per ogni giunto) sotto l'identificativo `MediaPipe_Kinematics`.
 
 ### 3. ⏱️ Data Logging e Sincronizzazione (`record_LSL.py`)
 Nodo di archiviazione centrale responsabile della generazione dei dataset:
 - **Aggancio degli Stream:** Si connette dinamicamente agli stream EMG e Cinematici sulla rete LSL.
-- **Pulling Asincrono:** Recupera "chunks" di dati garantendo il non-blocco dei thread (essenziale ad alte frequenze).
+- **Pulling Asincrono:** Recupera "chunks" di dati minimizzando il blocco dei thread.
 - **Strutturazione Dataset:** Concatena i dati su DataFrame e li esporta generando coppie di file `.csv` (`_EMG` e `_Kinematics`), condividendo la medesima base temporale ad alta risoluzione (`Timestamp_LSL`).
 
-### 4. 🧮 Analisi Cinematica Offline (`angles_kalman.py`)
-Modulo dedicato al calcolo della cinematica articolare e all'ottimizzazione del segnale visivo:
-- **Trigonometria Vettoriale:** Ricostruisce i vettori tridimensionali a partire dalle coordinate spaziali (falangi/metacarpi) derivando gli angoli di giunzione (es. CMC, MCP, PIP, DIP) tramite prodotto scalare.
-- **Filtro di Kalman (1D):** Implementa un filtro di Kalman univariato per mitigare in modo ottimale il rumore di misurazione e lo *jittering* intrinseco dei modelli di visione artificiale, fornendo un angolo "smoothed" altamente fedele all'effettiva biomeccanica della mano.
-- **Output Visivo e Analitico:** Produce grafici comparativi (Raw vs. Kalman) ed esporta i dati arricchiti in `_Angles_Kalman.csv`, ideali come label per i modelli di Machine/Deep Learning.
+### 4. 🧮 Analisi Offline e Post-Processing
+Moduli dedicati all'analisi a posteriori dei dataset estratti:
+- **Calcolo Angoli ed Estrazione Cinematica (`angles_kalman_offline.py`, `offline_angles_calculator.py`):** Ricostruisce i vettori tridimensionali a partire dalle coordinate spaziali, derivando gli angoli di giunzione (es. CMC, MCP, PIP, DIP) tramite prodotto scalare. Implementa un filtro di Kalman 1D per mitigare il rumore e lo *jittering* dei dati visivi. Produce inoltre grafici comparativi ed esporta i dati arricchiti in `_Angles_Kalman.csv`.
+- **Analisi Spettrale EMG (`plot_emg_spectrum.py`):** Script per la generazione di grafici PSD (Power Spectral Density) e spettrogrammi nel tempo. Utile per analizzare la risposta in frequenza dei segnali raw rispetto ai segnali pre-filtrati (es. verifica efficacia notch).
 
 ---
 
