@@ -109,9 +109,22 @@ class BionicFeatureExtractor:
 
 def main():
     # --- 1. DEFINIZIONE PERCORSI FILE ---
-    EMG_FILE = "NP_project/recordings/trial_1_EMG.csv"       # Usa trial_1 per TRAIN, trial_2 per VAL
-    KIN_FILE = "NP_project/recordings/trial_1_Kinematics.csv" 
-    OUTPUT_FILE = "NP_project/train_tensors.pt" # Cambia in val_tensors.pt quando processi il trial_2
+    # Ricava il percorso assoluto della cartella corrente dello script (NP_project)
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    RECORDINGS_DIR = os.path.join(BASE_DIR, "recordings")
+    
+    # --- DEBUG: Stampiamo cosa vede Python nella cartella ---
+    print(f"\n--- DEBUG PERCORSI ---")
+    print(f"Cercando nella cartella: {RECORDINGS_DIR}")
+    if os.path.exists(RECORDINGS_DIR):
+        print(f"File TROVATI in 'recordings': {os.listdir(RECORDINGS_DIR)}")
+    else:
+        print(f"ATTENZIONE: La cartella 'recordings' non esiste in {BASE_DIR}!")
+    print(f"----------------------\n")
+
+    EMG_FILE = os.path.join(BASE_DIR, "recordings", "trial_3_EMG.csv")       # Usa trial_1 per TRAIN, trial_2 per VAL
+    KIN_FILE = os.path.join(BASE_DIR, "recordings", "trial_3_Kinematics.csv") 
+    OUTPUT_FILE = os.path.join(BASE_DIR, "test_tensors.pt") # Cambia in val_tensors.pt quando processi il trial_2
     
     KIN_IKA_FILE = KIN_FILE.replace('.csv', '_IKA_24DoF.csv')
     
