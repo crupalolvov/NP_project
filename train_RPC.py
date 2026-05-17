@@ -6,7 +6,7 @@ from torch.utils.data import TensorDataset, DataLoader
 # Importa l'architettura esatta dal tuo file locale
 from RPC_Net import RPCNet_Exact 
 
-def train_model(train_file, val_file, epochs=3, batch_size=10):
+def train_model(train_file, val_file, epochs=10, batch_size=10):
     # 1. Caricamento dei dati di TRAIN
     print(f"Caricamento dei tensori di TRAIN da {train_file}...")
     train_data = torch.load(train_file)
@@ -30,7 +30,9 @@ def train_model(train_file, val_file, epochs=3, batch_size=10):
     optimizer = optim.Adam(model.parameters(), lr=1e-5, eps=1e-3, betas=(0.9, 0.99))
 
     # 4. Training Loop
-    print("Avvio addestramento (3 epoche)...")
+    print(f"Avvio addestramento ({epochs} epoche)...")
+    best_val_loss = float('inf')
+    
     for epoch in range(epochs):
         model.train()
         running_loss = 0.0
@@ -62,9 +64,13 @@ def train_model(train_file, val_file, epochs=3, batch_size=10):
         
         print(f"Epoca {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
 
-    # 5. Salvataggio dei pesi
-    torch.save(model.state_dict(), "NP_project/rpc_net_weights.pth")
-    print("Addestramento completato! Pesi salvati in 'NP_project/rpc_net_weights.pth'.")
+        # -- SALVATAGGIO DEL MIGLIOR MODELLO --
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            torch.save(model.state_dict(), "NP_project/rpc_net_weights.pth")
+            print(f"  --> Nuovo miglior modello trovato e salvato! (Val Loss: {best_val_loss:.6f})")
+
+    print("Addestramento completato! I pesi del miglior modello sono in 'NP_project/rpc_net_weights.pth'.")
 
 if __name__ == "__main__":
     FILE_TRAIN = "NP_project/train_tensors.pt" 

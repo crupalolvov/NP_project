@@ -107,7 +107,8 @@ def run_offline_inference(emg_csv_path, model_path, output_csv_path):
         # Filtraggio
         smoothed_angles = np.zeros(24)
         for j in range(24):
-            smoothed_angles[j], zi[j] = lfilter(b, a, [pred_angles[j]], zi=zi[j])
+            filtered_val, zi[j] = lfilter(b, a, [pred_angles[j]], zi=zi[j])
+            smoothed_angles[j] = filtered_val[0]
             
         # Aggiornamento buffer Angoli (Loop Ricorsivo)
         ang_buffer = np.roll(ang_buffer, shift=-1, axis=0)
@@ -139,7 +140,7 @@ def run_offline_inference(emg_csv_path, model_path, output_csv_path):
 # --- ESECUZIONE ---
 if __name__ == "__main__":
     # Assicurati di avere il modello addestrato e il dataset pronto
-    FILE_EMG_RMS = "NP_project/recordings/trial_5_EMG_RMS.csv" # Usa il file RMS a ~80Hz per il trial di testing
+    FILE_EMG_RMS = "NP_project/recordings/trial_3_EMG_RMS.csv" # Trial 3 ora è usato per il testing!
     FILE_MODELLO = "NP_project/rpc_net_weights.pth"
     FILE_OUTPUT = "NP_project/predicted_kinematics_offline.csv"
     

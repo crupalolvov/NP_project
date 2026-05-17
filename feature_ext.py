@@ -4,7 +4,7 @@ import torch
 import os
 from scipy.signal import butter, filtfilt, iirnotch
 from scipy.interpolate import interp1d
-from test_IKA import process_full_kinematics
+from IKA import process_full_kinematics
 
 class BionicFeatureExtractor:
     def __init__(self, fs_emg=2000):
@@ -109,22 +109,30 @@ class BionicFeatureExtractor:
 
 def main():
     # --- 1. DEFINIZIONE PERCORSI FILE ---
-    EMG_FILE = "NP_project/recordings/trial_3_EMG.csv"       # Usa trial_3 per TRAIN, trial_4 per VAL
-    KIN_FILE = "NP_project/recordings/trial_3_Kinematics.csv" 
-    OUTPUT_FILE = "NP_project/val_tensors.pt" # Cambia in val_tensors.pt quando processi il trial_4
+    EMG_FILE = "NP_project/recordings/trial_1_EMG.csv"       # Usa trial_1 per TRAIN, trial_2 per VAL
+    KIN_FILE = "NP_project/recordings/trial_1_Kinematics.csv" 
+    OUTPUT_FILE = "NP_project/train_tensors.pt" # Cambia in val_tensors.pt quando processi il trial_2
     
     KIN_IKA_FILE = KIN_FILE.replace('.csv', '_IKA_24DoF.csv')
     
-    # --- 1.5 CALCOLO IKA AUTOMATICO ---
-    if not os.path.exists(KIN_IKA_FILE):
-        print(f"File IKA non trovato. Avvio calcolo IKA automatico su {KIN_FILE}...")
-        process_full_kinematics(KIN_FILE)
-    else:
-        print(f"File IKA già presente: {KIN_IKA_FILE}. Salto il calcolo per risparmiare tempo.")
-    
     try:
         df_emg = pd.read_csv(EMG_FILE)
-        df_kin = pd.read_csv(KIN_IKA_FILE)
+        df_kin_raw = pd.read_csv(KIN_FILE)
+        
+        # --- 1.5 CONTROLLO E CALCOLO IKA AUTOMATICO ---
+        if 'LM_0_X' in df_kin_raw.columns:
+            if not os.path.exists(KIN_IKA_FILE):
+                print(f"File IKA non trovato. Avvio calcolo IKA automatico su {KIN_FILE}...")
+                process_full_kinematics(KIN_FILE)
+            else:
+                print(f"File IKA già presente: {KIN_IKA_FILE}. Salto il calcolo per risparmiare tempo.")
+            df_kin = pd.read_csv(KIN_IKA_FILE)
+        elif 'DoF_0' in df_kin_raw.columns:
+            print(f"Il file {KIN_FILE} contiene già gli angoli (DoF). IKA non necessaria.")
+            df_kin = df_kin_raw
+        else:
+            print("Errore: il file di cinematica non contiene né i landmark (LM) né gli angoli (DoF).")
+            return
     except FileNotFoundError as e:
         print(f"Errore: File non trovato. Assicurati che i CSV siano nella stessa cartella. Dettagli: {e}")
         return
