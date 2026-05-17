@@ -53,6 +53,7 @@ def run_offline_inference(emg_csv_path, model_path, output_csv_path):
     # Estrazione dei 32 canali (assumendo che le colonne si chiamino CH_0, CH_1, ... CH_31)
     # Adatta questo filtro in base all'intestazione reale del tuo CSV
     emg_columns = [col for col in df_emg.columns if 'CH_' in col]
+    emg_columns = [col for col in df_emg.columns if 'CH_' in col or 'EMG_' in col]
     emg_data = df_emg[emg_columns].values
     
     num_samples = len(emg_data)
@@ -138,8 +139,8 @@ def run_offline_inference(emg_csv_path, model_path, output_csv_path):
 # --- ESECUZIONE ---
 if __name__ == "__main__":
     # Assicurati di avere il modello addestrato e il dataset pronto
-    FILE_EMG_RMS = "dataset_trial1_EMG_RMS_81Hz.csv"
-    FILE_MODELLO = "rpc_net_optimized.pth"
-    FILE_OUTPUT = "predicted_kinematics_offline.csv"
+    FILE_EMG_RMS = "NP_project/recordings/trial_5_EMG_RMS.csv" # Usa il file RMS a ~80Hz per il trial di testing
+    FILE_MODELLO = "NP_project/rpc_net_weights.pth"
+    FILE_OUTPUT = "NP_project/predicted_kinematics_offline.csv"
     
     run_offline_inference(FILE_EMG_RMS, FILE_MODELLO, FILE_OUTPUT)

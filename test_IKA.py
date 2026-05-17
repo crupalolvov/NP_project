@@ -188,10 +188,10 @@ def process_full_kinematics(csv_path):
     
     # 3C. SALVATAGGIO
     angles_df = pd.DataFrame(angles_data)
-    output_name = csv_path.replace('_Raw.csv', '_IKA_24DoF.csv')
+    output_name = csv_path.replace('.csv', '_IKA_24DoF.csv')
     angles_df.to_csv(output_name, index=False)
     print(f"Dati salvati in: {output_name}")
 
 if __name__ == "__main__":
-    FILE_INPUT = "kinematics_recording_20260513_180113.csv"
+    FILE_INPUT = "NP_project/recordings/trial_5_Kinematics.csv"
     process_full_kinematics(FILE_INPUT)
