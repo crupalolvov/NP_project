@@ -215,7 +215,7 @@ class SoundtrackGUI(QtWidgets.QWidget):
         self.status_label = QtWidgets.QLabel("Acquisizione in corso... LSL Attivo")
         layout.addWidget(self.status_label)
         
-        self.instructions_label = QtWidgets.QLabel("Premi il tasto 'S' per aprire o chiudere la finestra dei 32 plot singoli")
+        self.instructions_label = QtWidgets.QLabel("Premi 'S' per i plot singoli, 'M' per il multiplot")
         self.instructions_label.setStyleSheet("font-weight: bold; color: #555555;")
         layout.addWidget(self.instructions_label)
         
@@ -252,7 +252,6 @@ class SoundtrackGUI(QtWidgets.QWidget):
         self.thread.start()
 
         self.multiplot_window = MultiplotWindow(self.sample_freq, 32, self.plot_time)
-        self.multiplot_window.show()
 
         # Shortcut globale: Funziona a prescindere da quale finestra abbia il focus
         self.shortcut_s = QtWidgets.QShortcut("S", self)
@@ -266,6 +265,10 @@ class SoundtrackGUI(QtWidgets.QWidget):
         self.shortcut_p = QtWidgets.QShortcut("P", self)
         self.shortcut_p.setContext(QtCore.Qt.ApplicationShortcut)
         self.shortcut_p.activated.connect(self.toggle_preprocessing)
+
+        self.shortcut_m = QtWidgets.QShortcut("M", self)
+        self.shortcut_m.setContext(QtCore.Qt.ApplicationShortcut)
+        self.shortcut_m.activated.connect(self.toggle_multiplot)
 
     def toggle_recording(self):
         msg = self.thread.toggle_recording()
@@ -305,6 +308,12 @@ class SoundtrackGUI(QtWidgets.QWidget):
             self.single_plots_window.hide()
         else:
             self.single_plots_window.show()
+
+    def toggle_multiplot(self):
+        if self.multiplot_window.isVisible():
+            self.multiplot_window.hide()
+        else:
+            self.multiplot_window.show()
 
     def closeEvent(self, event):
         if hasattr(self, 'multiplot_window'):
