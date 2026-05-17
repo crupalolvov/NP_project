@@ -111,9 +111,9 @@ def main():
     # --- 1. DEFINIZIONE PERCORSI FILE ---
     # Ricava il percorso assoluto della cartella corrente dello script (NP_project)
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    EMG_FILE = "recordings/trial_1_EMG.csv"       # Usa trial_1 per TRAIN, trial_2 per VAL
-    KIN_FILE = "recordings/trial_1_Kinematics.csv" 
-    OUTPUT_FILE = "train_tensors.pt" # Cambia in val_tensors.pt quando processi il trial_2
+    EMG_FILE = os.path.join(BASE_DIR, "recordings/trial_1_EMG.csv")       # Usa trial_1 per TRAIN, trial_2 per VAL
+    KIN_FILE = os.path.join(BASE_DIR, "recordings/trial_1_Kinematics.csv") 
+    OUTPUT_FILE = os.path.join(BASE_DIR, "train_tensors.pt") # Cambia in val_tensors.pt quando processi il trial_2
     
     KIN_IKA_FILE = KIN_FILE.replace('.csv', '_IKA_24DoF.csv')
     

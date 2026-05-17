@@ -11,9 +11,6 @@ def Ry(theta):
     return np.array([[np.cos(theta), 0, np.sin(theta)], [0, 1, 0], [-np.sin(theta), 0, np.cos(theta)]])
 
 def Rz(theta):
-    return np.array([[np.cos(theta), -np.sin(theta), 0], [np.sin(theta), 2, 0], [0, 0, 1]]) # Corretto sotto
-
-def Rz_corr(theta):
     return np.array([[np.cos(theta), -np.sin(theta), 0], [np.sin(theta), np.cos(theta), 0], [0, 0, 1]])
 
 # --- 2. MODELLO CINEMATICO E OTTIMIZZAZIONE ---
@@ -43,7 +40,7 @@ class HandIKA:
         LMs = np.zeros((21, 3))
         
         # 0. Polso (Origine + Rotazione Globale del polso)
-        R_wrist = Rx(q[0]) @ Ry(q[1]) @ Rz_corr(q[2])
+        R_wrist = Rx(q[0]) @ Ry(q[1]) @ Rz(q[2])
         LMs[0] = [0, 0, 0] # Il polso è sempre all'origine locale
         
         # --- DITA LUNGHE (Indice=1, Medio=2, Anulare=3, Mignolo=4) ---
@@ -85,7 +82,7 @@ class HandIKA:
         LMs[2] = LMs[1] + (R_cmc @ v_prox_t)
         
         R_mcp_t = R_cmc @ Rx(q[5]) @ Ry(q[6])
-        v_inter_t = np.array([0, self.calib['lengths']['Thumb_Distal'], 0]) # Uso Distal per coprire il segmento
+        v_inter_t = np.array([0, self.calib['lengths']['Thumb_Intermediate'], 0])
         LMs[3] = LMs[2] + (R_mcp_t @ v_inter_t)
         
         R_ip_t = R_mcp_t @ Rx(q[7])
@@ -126,42 +123,20 @@ def process_full_kinematics(csv_path):
     print("Avvio Pipeline IKA 24-DoF...")
     df = pd.read_csv(csv_path)
     
-    # 3A. FASE DI CALIBRAZIONE (Primi 5 secondi)
-    # Assumiamo che Timestamp_LSL sia in secondi. Troviamo l'indice dei primi 5s.
-    t0 = df['Timestamp_LSL'].iloc[0]
-    calib_df = df[df['Timestamp_LSL'] <= t0 + 5.0]
+    # 3A. CARICAMENTO CALIBRAZIONE STATICA (Da Foto)
+    import torch
+    import os
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    CALIB_FILE = os.path.join(BASE_DIR, "hand_calibration.pt")
     
-    bones = {
-        'Thumb_Proximal': (2, 3), 'Thumb_Distal': (3, 4),
-        'Index_Proximal': (5, 6), 'Index_Intermediate': (6, 7), 'Index_Distal': (7, 8),
-        'Middle_Proximal': (9, 10), 'Middle_Intermediate': (10, 11), 'Middle_Distal': (11, 12),
-        'Ring_Proximal': (13, 14), 'Ring_Intermediate': (14, 15), 'Ring_Distal': (15, 16),
-        'Pinky_Proximal': (17, 18), 'Pinky_Intermediate': (18, 19), 'Pinky_Distal': (19, 20)
-    }
-    
-    calib_data = {'lengths': {}, 'meta_vectors': {}}
-    
-    print(f"Calibrazione su {len(calib_df)} frame...")
-    # Calcolo lunghezze falangi
-    for bone_name, (idx1, idx2) in bones.items():
-        lengths = []
-        for _, row in calib_df.iterrows():
-            p1 = np.array([row[f'LM_{idx1}_X'], row[f'LM_{idx1}_Y'], row[f'LM_{idx1}_Z']])
-            p2 = np.array([row[f'LM_{idx2}_X'], row[f'LM_{idx2}_Y'], row[f'LM_{idx2}_Z']])
-            lengths.append(np.linalg.norm(p2 - p1))
-        calib_data['lengths'][bone_name] = np.mean(lengths)
-
-    # Calcolo vettori metacarpi (dal polso LM_0 alla base delle dita) centrati
-    meta_bases = {'Thumb': 1, 'Index': 5, 'Middle': 9, 'Ring': 13, 'Pinky': 17}
-    for finger, idx in meta_bases.items():
-        vecs = []
-        for _, row in calib_df.iterrows():
-            wrist = np.array([row['LM_0_X'], row['LM_0_Y'], row['LM_0_Z']])
-            base = np.array([row[f'LM_{idx}_X'], row[f'LM_{idx}_Y'], row[f'LM_{idx}_Z']])
-            vecs.append(base - wrist)
-        calib_data['meta_vectors'][finger] = np.mean(vecs, axis=0)
+    if not os.path.exists(CALIB_FILE):
+        print(f"Errore: File di calibrazione '{CALIB_FILE}' non trovato!")
+        print("Esegui prima lo script 'photo_calibration.py' con la foto della tua mano.")
+        return
         
-    print("Calibrazione completata. Avvio Ottimizzazione SLSQP...")
+    calib_data = torch.load(CALIB_FILE, weights_only=False)
+    print("Calibrazione statica (dalla foto) caricata con successo.")
+    print("Avvio Ottimizzazione SLSQP...")
 
     # 3B. FASE DI OTTIMIZZAZIONE IKA
     ika_solver = HandIKA(calib_data)
