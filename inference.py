@@ -60,7 +60,7 @@ def run_offline_inference(emg_csv_path, model_path, output_csv_path):
     
     # 2. Inizializzazione Modello PyTorch
     model = RPCNet_Exact(in_emg=512, in_ang=192)
-    model.load_state_dict(torch.load(model_path))
+    model.load_state_dict(torch.load(model_path, weights_only=True))
     model.eval()
     
     # 3. Inizializzazione Buffer (0.78s di memoria)
