@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import datetime
 import threading
-from pylsl import StreamInfo, StreamOutlet
+from pylsl import StreamInfo, StreamOutlet, local_clock
 
 # ==========================================
 # 1. SETUP LAB STREAMING LAYER (LSL)
@@ -34,13 +34,15 @@ status_message_display_time = 0
 def update_result(result, output_image, timestamp_ms):
     global latest_landmarks, is_recording, recording_data
     
-    if result.hand_landmarks:
+    if result.hand_landmarks and result.hand_world_landmarks:
         with data_lock:
-            latest_landmarks = result.hand_landmarks[0]
-            lsl_timestamp = timestamp_ms / 1000.0 
+            latest_landmarks = result.hand_landmarks[0] # Usati per disegnare i punti sul video
+            world_landmarks = result.hand_world_landmarks[0] # Dati 3D reali in METRI
+            
+            lsl_timestamp = local_clock() # Usa l'orologio globale di LSL (stesso dell'EMG!)
             
             flattened_coords = []
-            for lm in latest_landmarks:
+            for lm in world_landmarks:
                 flattened_coords.extend([lm.x, lm.y, lm.z])
                 
             outlet.push_sample(flattened_coords, lsl_timestamp)

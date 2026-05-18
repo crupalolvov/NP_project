@@ -22,14 +22,14 @@ class HandIKA:
         # Limiti anatomici [Min, Max] in radianti per i 24 DoF
         self.bounds = [
             # Polso (3 DoF: Flex/Ext, Abd/Add, Pro/Sup)
-            (-1.5, 1.5), (-0.5, 0.5), (-1.5, 1.5),
+            (-3.14, 3.14), (-3.14, 3.14), (-3.14, 3.14),
             # Pollice (5 DoF: CMC_FE, CMC_AA, MCP_FE, MCP_AA, IP_FE)
-            (-0.5, 0.5), (-0.5, 1.5), (-0.5, 0.5), (-0.5, 1.5), (-0.5, 1.5),
+            (-1.0, 1.0), (-1.0, 1.5), (-1.0, 1.0), (-1.0, 1.5), (-1.0, 1.5),
             # Indice, Medio, Anulare, Mignolo (4 DoF x 4: MCP_FE, MCP_AA, PIP_FE, DIP_FE)
-            (-0.2, 1.5), (-0.3, 0.3), (0.0, 1.7), (0.0, 1.5), # Indice
-            (-0.2, 1.5), (-0.2, 0.2), (0.0, 1.7), (0.0, 1.5), # Medio
-            (-0.2, 1.5), (-0.2, 0.2), (0.0, 1.7), (0.0, 1.5), # Anulare
-            (-0.2, 1.5), (-0.3, 0.3), (0.0, 1.7), (0.0, 1.5)  # Mignolo
+            (-0.2, 1.5), (-0.4, 0.4), (-0.1, 1.7), (-0.1, 1.5), # Indice
+            (-0.2, 1.5), (-0.3, 0.3), (-0.1, 1.7), (-0.1, 1.5), # Medio
+            (-0.2, 1.5), (-0.3, 0.3), (-0.1, 1.7), (-0.1, 1.5), # Anulare
+            (-0.2, 1.5), (-0.4, 0.4), (-0.1, 1.7), (-0.1, 1.5)  # Mignolo
         ]
         
         # Stato corrente per il "warm start" (inizia da zero)
@@ -56,37 +56,40 @@ class HandIKA:
             
             # Vettore Metacarpo (Fisso rispetto al polso, calibrato)
             v_meta = self.calib['meta_vectors'][finger_name]
+            # Direzione di estensione naturale del dito (invece di Y globale)
+            finger_dir = v_meta / (np.linalg.norm(v_meta) + 1e-6)
             LMs[lm_idx[0]] = R_wrist @ v_meta
             
             # Articolazione MCP (Rotazione su 2 assi: Flex/Ext e Abd/Add)
             R_mcp = R_wrist @ Rx(q[q_idx]) @ Ry(q[q_idx+1])
-            v_prox = np.array([0, self.calib['lengths'][f'{finger_name}_Proximal'], 0])
+            v_prox = finger_dir * self.calib['lengths'][f'{finger_name}_Proximal']
             LMs[lm_idx[1]] = LMs[lm_idx[0]] + (R_mcp @ v_prox)
             
             # Articolazione PIP (Rotazione su 1 asse: Flex/Ext)
             R_pip = R_mcp @ Rx(q[q_idx+2])
-            v_inter = np.array([0, self.calib['lengths'][f'{finger_name}_Intermediate'], 0])
+            v_inter = finger_dir * self.calib['lengths'][f'{finger_name}_Intermediate']
             LMs[lm_idx[2]] = LMs[lm_idx[1]] + (R_pip @ v_inter)
             
             # Articolazione DIP (Rotazione su 1 asse: Flex/Ext)
             R_dip = R_pip @ Rx(q[q_idx+3])
-            v_dist = np.array([0, self.calib['lengths'][f'{finger_name}_Distal'], 0])
+            v_dist = finger_dir * self.calib['lengths'][f'{finger_name}_Distal']
             LMs[lm_idx[3]] = LMs[lm_idx[2]] + (R_dip @ v_dist)
 
         # --- POLLICE --- (Semplificato per adattarsi all'array)
         v_meta_t = self.calib['meta_vectors']['Thumb']
+        thumb_dir = v_meta_t / (np.linalg.norm(v_meta_t) + 1e-6)
         LMs[1] = R_wrist @ v_meta_t
         
         R_cmc = R_wrist @ Rx(q[3]) @ Ry(q[4])
-        v_prox_t = np.array([0, self.calib['lengths']['Thumb_Proximal'], 0])
+        v_prox_t = thumb_dir * self.calib['lengths']['Thumb_Proximal']
         LMs[2] = LMs[1] + (R_cmc @ v_prox_t)
         
         R_mcp_t = R_cmc @ Rx(q[5]) @ Ry(q[6])
-        v_inter_t = np.array([0, self.calib['lengths']['Thumb_Intermediate'], 0])
+        v_inter_t = thumb_dir * self.calib['lengths']['Thumb_Intermediate']
         LMs[3] = LMs[2] + (R_mcp_t @ v_inter_t)
         
         R_ip_t = R_mcp_t @ Rx(q[7])
-        v_dist_t = np.array([0, self.calib['lengths']['Thumb_Distal'], 0])
+        v_dist_t = thumb_dir * self.calib['lengths']['Thumb_Distal']
         LMs[4] = LMs[3] + (R_ip_t @ v_dist_t)
 
         return LMs
@@ -97,25 +100,40 @@ class HandIKA:
         weights = np.ones(21)
         weights[[4, 8, 12, 16, 20]] = 2.0 
         
-        error = np.sum(weights * np.linalg.norm(estimated - target_landmarks, axis=1)**2)
+        # FIX MATEMATICO: Convertiamo i metri in millimetri (* 1000)
+        # Questo impedisce al solutore SLSQP di fermarsi all'iterazione 0 per "Loss troppo piccola"
+        diff_mm = (estimated - target_landmarks) * 1000.0
+        error = np.sum(weights * np.linalg.norm(diff_mm, axis=1)**2)
         return error
 
     def solve_frame(self, target_landmarks):
-        # Trasla i target in modo che il polso (LM 0) sia esattamente nell'origine (0,0,0)
-        wrist_pos = np.copy(target_landmarks[0])
+        # 1. Trasla i target in modo che il polso (LM 0) sia nell'origine
+        wrist_pos = target_landmarks[0]
         centered_targets = target_landmarks - wrist_pos
+        
+        # 2. Scaling Dinamico per adattare le coordinate ML al modello calibrato
+        # Usiamo la distanza polso-nocca media (LM 0 -> LM 9) come righello
+        target_dist = np.linalg.norm(centered_targets[9])
+        model_dist = np.linalg.norm(self.calib['meta_vectors']['Middle'])
+        
+        if target_dist > 0 and model_dist > 0:
+            scale_factor = target_dist / model_dist
+            scaled_targets = centered_targets / scale_factor
+        else:
+            scaled_targets = centered_targets
+        # ----------------------------------------------------------------
         
         result = minimize(
             fun=self.objective_function,
             x0=self.q_current,             
-            args=(centered_targets,),
-            method='SLSQP',
+            args=(scaled_targets,),
+            method='L-BFGS-B',
             bounds=self.bounds,
-            options={'ftol': 1e-5, 'maxiter': 100, 'disp': False}
+            options={'ftol': 1e-6, 'maxiter': 60, 'disp': False}
         )
         
-        if result.success:
-            self.q_current = result.x
+        # Assegniamo sempre il risultato calcolato
+        self.q_current = result.x
         return self.q_current
 
 # --- 3. PIPELINE AUTOMATIZZATA ---
@@ -136,7 +154,7 @@ def process_full_kinematics(csv_path):
         
     calib_data = torch.load(CALIB_FILE, weights_only=False)
     print("Calibrazione statica (dalla foto) caricata con successo.")
-    print("Avvio Ottimizzazione SLSQP...")
+    print("Avvio Ottimizzazione L-BFGS-B...")
 
     # 3B. FASE DI OTTIMIZZAZIONE IKA
     ika_solver = HandIKA(calib_data)
@@ -163,7 +181,7 @@ def process_full_kinematics(csv_path):
     
     # 3C. SALVATAGGIO
     angles_df = pd.DataFrame(angles_data)
-    output_name = csv_path.replace('.csv', '_IKA_24DoF.csv')
+    output_name = csv_path.replace('.csv', '_IKA_24DoF_v3.csv')
     angles_df.to_csv(output_name, index=False)
     print(f"Dati salvati in: {output_name}")
 
