@@ -60,19 +60,24 @@ class HandIKA:
             finger_dir = v_meta / (np.linalg.norm(v_meta) + 1e-6)
             LMs[lm_idx[0]] = R_wrist @ v_meta
             
+            # Matrice di splay per allineare l'asse Y locale al metacarpo
+            theta_x = np.arcsin(np.clip(finger_dir[2], -1.0, 1.0))
+            theta_z = np.arctan2(-finger_dir[0], finger_dir[1])
+            R_splay = Rz(theta_z) @ Rx(theta_x)
+
             # Articolazione MCP (Rotazione su 2 assi: Flex/Ext e Abd/Add)
-            R_mcp = R_wrist @ Rx(q[q_idx]) @ Ry(q[q_idx+1])
-            v_prox = finger_dir * self.calib['lengths'][f'{finger_name}_Proximal']
+            R_mcp = R_wrist @ R_splay @ Rx(q[q_idx]) @ Rz(q[q_idx+1])
+            v_prox = np.array([0, self.calib['lengths'][f'{finger_name}_Proximal'], 0])
             LMs[lm_idx[1]] = LMs[lm_idx[0]] + (R_mcp @ v_prox)
             
             # Articolazione PIP (Rotazione su 1 asse: Flex/Ext)
             R_pip = R_mcp @ Rx(q[q_idx+2])
-            v_inter = finger_dir * self.calib['lengths'][f'{finger_name}_Intermediate']
+            v_inter = np.array([0, self.calib['lengths'][f'{finger_name}_Intermediate'], 0])
             LMs[lm_idx[2]] = LMs[lm_idx[1]] + (R_pip @ v_inter)
             
             # Articolazione DIP (Rotazione su 1 asse: Flex/Ext)
             R_dip = R_pip @ Rx(q[q_idx+3])
-            v_dist = finger_dir * self.calib['lengths'][f'{finger_name}_Distal']
+            v_dist = np.array([0, self.calib['lengths'][f'{finger_name}_Distal'], 0])
             LMs[lm_idx[3]] = LMs[lm_idx[2]] + (R_dip @ v_dist)
 
         # --- POLLICE --- (Semplificato per adattarsi all'array)
@@ -80,16 +85,20 @@ class HandIKA:
         thumb_dir = v_meta_t / (np.linalg.norm(v_meta_t) + 1e-6)
         LMs[1] = R_wrist @ v_meta_t
         
-        R_cmc = R_wrist @ Rx(q[3]) @ Ry(q[4])
-        v_prox_t = thumb_dir * self.calib['lengths']['Thumb_Proximal']
+        theta_x_t = np.arcsin(np.clip(thumb_dir[2], -1.0, 1.0))
+        theta_z_t = np.arctan2(-thumb_dir[0], thumb_dir[1])
+        R_splay_t = Rz(theta_z_t) @ Rx(theta_x_t)
+
+        R_cmc = R_wrist @ R_splay_t @ Rx(q[3]) @ Rz(q[4])
+        v_prox_t = np.array([0, self.calib['lengths']['Thumb_Proximal'], 0])
         LMs[2] = LMs[1] + (R_cmc @ v_prox_t)
         
-        R_mcp_t = R_cmc @ Rx(q[5]) @ Ry(q[6])
-        v_inter_t = thumb_dir * self.calib['lengths']['Thumb_Intermediate']
+        R_mcp_t = R_cmc @ Rx(q[5]) @ Rz(q[6])
+        v_inter_t = np.array([0, self.calib['lengths']['Thumb_Intermediate'], 0])
         LMs[3] = LMs[2] + (R_mcp_t @ v_inter_t)
         
         R_ip_t = R_mcp_t @ Rx(q[7])
-        v_dist_t = thumb_dir * self.calib['lengths']['Thumb_Distal']
+        v_dist_t = np.array([0, self.calib['lengths']['Thumb_Distal'], 0])
         LMs[4] = LMs[3] + (R_ip_t @ v_dist_t)
 
         return LMs
@@ -107,26 +116,14 @@ class HandIKA:
         return error
 
     def solve_frame(self, target_landmarks):
-        # 1. Trasla i target in modo che il polso (LM 0) sia nell'origine
+        # Trasla i target in modo che il polso (LM 0) sia nell'origine
         wrist_pos = target_landmarks[0]
         centered_targets = target_landmarks - wrist_pos
-        
-        # 2. Scaling Dinamico per adattare le coordinate ML al modello calibrato
-        # Usiamo la distanza polso-nocca media (LM 0 -> LM 9) come righello
-        target_dist = np.linalg.norm(centered_targets[9])
-        model_dist = np.linalg.norm(self.calib['meta_vectors']['Middle'])
-        
-        if target_dist > 0 and model_dist > 0:
-            scale_factor = target_dist / model_dist
-            scaled_targets = centered_targets / scale_factor
-        else:
-            scaled_targets = centered_targets
-        # ----------------------------------------------------------------
         
         result = minimize(
             fun=self.objective_function,
             x0=self.q_current,             
-            args=(scaled_targets,),
+            args=(centered_targets,),
             method='L-BFGS-B',
             bounds=self.bounds,
             options={'ftol': 1e-6, 'maxiter': 60, 'disp': False}
@@ -181,7 +178,7 @@ def process_full_kinematics(csv_path):
     
     # 3C. SALVATAGGIO
     angles_df = pd.DataFrame(angles_data)
-    output_name = csv_path.replace('.csv', '_IKA_24DoF_v3.csv')
+    output_name = csv_path.replace('.csv', '_IKA_24DoF_v7.csv')
     angles_df.to_csv(output_name, index=False)
     print(f"Dati salvati in: {output_name}")
 

@@ -4,8 +4,8 @@ import numpy as np
 import pandas as pd
 import torch
 from PyQt5 import QtWidgets, QtCore
-import pyqtgraph as pg
-import pyqtgraph.opengl as gl
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 from RPC_Net import RPCNet_Exact
 from IKA import HandIKA
 
@@ -80,23 +80,22 @@ class HandAnimationApp(QtWidgets.QMainWindow):
         self.setCentralWidget(central_widget)
         layout = QtWidgets.QVBoxLayout(central_widget)
 
-        # Visualizzatore 3D (pyqtgraph opengl)
-        self.view = gl.GLViewWidget()
-        self.view.setCameraPosition(distance=0.3, elevation=30, azimuth=45)
-        self.view.setBackgroundColor('k')
-        # Griglia di riferimento
-        grid = gl.GLGridItem()
-        grid.scale(0.1, 0.1, 0.1)
-        self.view.addItem(grid)
-        layout.addWidget(self.view, stretch=1)
-
-        # Legenda Colori
-        legend_layout = QtWidgets.QHBoxLayout()
-        legend_layout.addWidget(QtWidgets.QLabel("<b style='color:green;'>■ Reale (Ground Truth)</b>"))
-        legend_layout.addWidget(QtWidgets.QLabel("<b style='color:red;'>■ Predetto (RPC-Net)</b>"))
-        legend_layout.addWidget(QtWidgets.QLabel("<b style='color:yellow;'>■ Polso (Origine)</b>"))
-        legend_layout.addStretch()
-        layout.addLayout(legend_layout)
+        # Visualizzatore 3D (Matplotlib integrato in PyQt5)
+        self.fig = Figure(figsize=(8, 8), dpi=100)
+        self.canvas = FigureCanvas(self.fig)
+        self.ax = self.fig.add_subplot(111, projection='3d')
+        layout.addWidget(self.canvas, stretch=1)
+        
+        # Configurazione degli assi e della prospettiva
+        self.ax.set_xlim(-0.2, 0.2)
+        self.ax.set_ylim(-0.2, 0.2)
+        self.ax.invert_yaxis() # Invertito: nei video la Y scende verso il basso
+        self.ax.set_zlim(-0.2, 0.2)
+        self.ax.set_box_aspect([1, 1, 1]) # Mantiene le proporzioni cubiche per non deformare la mano
+        self.ax.set_xlabel('X (Metri)')
+        self.ax.set_ylabel('Y (Metri)')
+        self.ax.set_zlabel('Z (Metri)')
+        self.ax.set_title('Monitor Cinematica 3D - RPC-Net')
 
         # Connessioni landmark (come nel vecchio script)
         self.connections = [
@@ -105,21 +104,14 @@ class HandAnimationApp(QtWidgets.QMainWindow):
             (15, 16), (0, 17), (17, 18), (18, 19), (19, 20)
         ]
 
-        # Inizializzazione oggetti grafici per la mano REALE (Verde)
-        self.points_true = gl.GLScatterPlotItem(size=8, pxMode=True)
-        self.lines_true = [gl.GLLinePlotItem(width=3, antialias=True, mode='lines') for _ in self.connections]
-        self.view.addItem(self.points_true)
-        for line in self.lines_true: self.view.addItem(line)
+        # Inizializzazione oggetti grafici per la mano REALE e PREDETTA
+        self.scatter_true = self.ax.scatter([], [], [], c='green', s=40, label='Reale (Ground Truth)', alpha=0.7)
+        self.lines_true = [self.ax.plot([], [], [], c='green', linewidth=2.5, alpha=0.5)[0] for _ in self.connections]
 
-        # Inizializzazione oggetti grafici per la mano PREDETTA (Rossa)
-        self.points_pred = gl.GLScatterPlotItem(size=6, pxMode=True)
-        self.lines_pred = [gl.GLLinePlotItem(width=2, antialias=True, mode='lines') for _ in self.connections]
-        self.view.addItem(self.points_pred)
-        for line in self.lines_pred: self.view.addItem(line)
-
-        # Marcatori speciali per il polso (Landmark 0)
-        self.wrist_marker = gl.GLScatterPlotItem(size=15, pxMode=True)
-        self.view.addItem(self.wrist_marker)
+        self.scatter_pred = self.ax.scatter([], [], [], c='red', s=40, label='Predetto (RPC-Net)', alpha=0.9)
+        self.lines_pred = [self.ax.plot([], [], [], c='red', linewidth=2.5, linestyle='--')[0] for _ in self.connections]
+        
+        self.ax.legend(loc='upper right')
 
         # Controlli (Slider e Pulsanti)
         ctrl_layout = QtWidgets.QHBoxLayout()
@@ -152,34 +144,28 @@ class HandAnimationApp(QtWidgets.QMainWindow):
         if frame_idx % 50 == 0:
             print(f"Frame {frame_idx}: Posizione Indice Reale {lm_true[8][0]:.4f}, Predetta {lm_pred[8][0]:.4f}")
 
-        # Update Punti (Scatter)
-        # Colore landmark: verde per reale, rosso per predetto
-        colors_true = np.array([[0, 1, 0, 0.8]] * 21)
-        colors_pred = np.array([[1, 0, 0, 0.7]] * 21)
-        
-        self.points_true.setData(pos=lm_true, color=colors_true)
-        self.points_pred.setData(pos=lm_pred, color=colors_pred)
-
-        # Update Marcatori Polso (Landmark 0) - Lo rendiamo giallo e grande
-        wrist_pos = np.array([lm_true[0]])
-        self.wrist_marker.setData(pos=wrist_pos, color=np.array([[1, 1, 0, 1]]))
+        # Update Punti (Scatter 3D)
+        self.scatter_true._offsets3d = (lm_true[:, 0], lm_true[:, 1], lm_true[:, 2])
+        self.scatter_pred._offsets3d = (lm_pred[:, 0], lm_pred[:, 1], lm_pred[:, 2])
 
         # Update Linee (Ossa)
         for i, (p1, p2) in enumerate(self.connections):
             # Mano Reale
-            pts_t = np.array([lm_true[p1], lm_true[p2]])
-            self.lines_true[i].setData(pos=pts_t, color=(0, 1, 0, 1))
+            self.lines_true[i].set_data([lm_true[p1, 0], lm_true[p2, 0]], [lm_true[p1, 1], lm_true[p2, 1]])
+            self.lines_true[i].set_3d_properties([lm_true[p1, 2], lm_true[p2, 2]])
             
             # Mano Predetta
-            pts_p = np.array([lm_pred[p1], lm_pred[p2]])
-            self.lines_pred[i].setData(pos=pts_p, color=(1, 0, 0, 0.5))
+            self.lines_pred[i].set_data([lm_pred[p1, 0], lm_pred[p2, 0]], [lm_pred[p1, 1], lm_pred[p2, 1]])
+            self.lines_pred[i].set_3d_properties([lm_pred[p1, 2], lm_pred[p2, 2]])
+
+        self.canvas.draw_idle()
 
     def toggle_play(self):
         if self.is_playing:
             self.timer.stop()
             self.btn_play.setText("Play")
         else:
-            self.timer.start(25) # ~40 FPS
+            self.timer.start(30) # ~33 FPS
             self.btn_play.setText("Pause")
         self.is_playing = not self.is_playing
 

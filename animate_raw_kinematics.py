@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+from matplotlib.widgets import Slider, Button
 import os
 
 # Connessioni anatomiche della mano secondo MediaPipe
@@ -31,6 +32,7 @@ def visualize_raw_csv(csv_path, step=2):
         frames_data[:, i, 2] = df[f'LM_{i}_Z'].values
 
     fig = plt.figure(figsize=(8, 8))
+    fig.subplots_adjust(bottom=0.2) # Creiamo spazio in basso per lo slider
     ax = fig.add_subplot(111, projection='3d')
     
     # Limiti: X, Y in MediaPipe sono normalizzati da 0 a 1.
@@ -46,7 +48,7 @@ def visualize_raw_csv(csv_path, step=2):
     lines = [ax.plot([], [], [], c='blue', linewidth=2.5)[0] for _ in range(len(CONNECTIONS))]
 
     def update(frame_idx):
-        data = frames_data[frame_idx]
+        data = frames_data[int(frame_idx)]
         # Aggiorna i punti
         scatter._offsets3d = (data[:, 0], data[:, 1], data[:, 2])
         # Aggiorna i segmenti (ossa)
@@ -55,7 +57,45 @@ def visualize_raw_csv(csv_path, step=2):
             line.set_3d_properties([data[i, 2], data[j, 2]])
         return [scatter] + lines
 
-    ani = animation.FuncAnimation(fig, update, frames=num_frames, interval=30, blit=False)
+    # Aggiunta Slider
+    ax_slider = fig.add_axes([0.15, 0.05, 0.65, 0.03])
+    slider = Slider(ax_slider, 'Frame', 0, num_frames - 1, valinit=0, valstep=1)
+    fig.slider = slider  # Previene la garbage collection
+
+    # Aggiunta Pulsante Play/Pause
+    ax_button = fig.add_axes([0.85, 0.05, 0.1, 0.03])
+    btn_play = Button(ax_button, 'Pause')
+    fig.btn_play = btn_play
+
+    is_playing = [True]
+
+    def on_slider_change(val):
+        update(val)
+        fig.canvas.draw_idle()
+
+    slider.on_changed(on_slider_change)
+
+    def toggle_play(event):
+        is_playing[0] = not is_playing[0]
+        if is_playing[0]:
+            btn_play.label.set_text('Pause')
+            ani.event_source.start()
+        else:
+            btn_play.label.set_text('Play')
+            ani.event_source.stop()
+        fig.canvas.draw_idle()
+
+    btn_play.on_clicked(toggle_play)
+
+    def frame_generator():
+        while True:
+            yield (slider.val + 1) % num_frames
+
+    def animate(frame_idx):
+        slider.set_val(frame_idx)
+        return [scatter] + lines
+
+    ani = animation.FuncAnimation(fig, animate, frames=frame_generator, interval=30, blit=False, cache_frame_data=False)
     plt.show()
 
 if __name__ == "__main__":

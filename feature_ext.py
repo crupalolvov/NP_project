@@ -115,15 +115,12 @@ def main():
     KIN_FILE = os.path.join(BASE_DIR, "recordings/trial_3_Kinematics.csv") 
     OUTPUT_FILE = os.path.join(BASE_DIR, "test_tensors.pt") # Cambia in val_tensors.pt quando processi il trial_2
     
-    
-    KIN_IKA_FILE = KIN_FILE.replace('.csv', '_IKA_24DoF_v3.csv')
+    KIN_IKA_FILE = KIN_FILE.replace('.csv', '_IKA_24DoF_v7.csv')
     
     try:
         df_emg = pd.read_csv(EMG_FILE)
         df_kin_raw = pd.read_csv(KIN_FILE)
         
-        
-
         # --- 1.5 CONTROLLO E CALCOLO IKA AUTOMATICO ---
         if 'LM_0_X' in df_kin_raw.columns:
             if not os.path.exists(KIN_IKA_FILE):
@@ -142,21 +139,18 @@ def main():
         print(f"Errore: File non trovato. Assicurati che i CSV siano nella stessa cartella. Dettagli: {e}")
         return
 
-    print(f"Timestamp EMG: inizio {df_emg['Timestamp_LSL'].iloc[0]:.2f}, fine {df_emg['Timestamp_LSL'].iloc[-1]:.2f}")
-    print(f"Timestamp KIN: inizio {df_kin['Timestamp_LSL'].iloc[0]:.2f}, fine {df_kin['Timestamp_LSL'].iloc[-1]:.2f}")
-    print(f"Differenza tra l'inizio dei due stream: {abs(df_emg['Timestamp_LSL'].iloc[0] - df_kin['Timestamp_LSL'].iloc[0]):.2f} secondi")
-    
-    # --- FIX SINCRONIZZAZIONE LSL ---
+    # --- FIX FORZATO OFFSET TEMPORALE ---
     print("\n--- CORREZIONE OFFSET TEMPORALE ---")
-    durata_emg = df_emg['Timestamp_LSL'].iloc[-1] - df_emg['Timestamp_LSL'].iloc[0]
-    durata_kin = df_kin['Timestamp_LSL'].iloc[-1] - df_kin['Timestamp_LSL'].iloc[0]
+    start_emg = df_emg['Timestamp_LSL'].iloc[0]
+    start_kin = df_kin['Timestamp_LSL'].iloc[0]
+    durata_emg = df_emg['Timestamp_LSL'].iloc[-1] - start_emg
+    durata_kin = df_kin['Timestamp_LSL'].iloc[-1] - start_kin
     print(f"Durata netta EMG: {durata_emg:.2f} sec | Durata netta KIN: {durata_kin:.2f} sec")
     
-    # Sottraiamo il primo timestamp a tutti i campioni. 
-    # In questo modo entrambe le serie temporali inizieranno esattamente a 0.0
-    df_emg['Timestamp_LSL'] = df_emg['Timestamp_LSL'] - df_emg['Timestamp_LSL'].iloc[0]
-    df_kin['Timestamp_LSL'] = df_kin['Timestamp_LSL'] - df_kin['Timestamp_LSL'].iloc[0]
-    print("Timestamp riallineati a t=0 con successo.\n")
+    # Allineamento forzato a t=0 per recuperare i vecchi trial
+    df_emg['Timestamp_LSL'] = df_emg['Timestamp_LSL'] - start_emg
+    df_kin['Timestamp_LSL'] = df_kin['Timestamp_LSL'] - start_kin
+    print("Timestamp riallineati forzatamente a t=0 con successo.\n")
     # --------------------------------
 
     # --- 2. ESECUZIONE PIPELINE ---

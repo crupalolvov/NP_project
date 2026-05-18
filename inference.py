@@ -52,7 +52,6 @@ def run_offline_inference(emg_csv_path, model_path, output_csv_path):
     
     # Estrazione dei 32 canali (assumendo che le colonne si chiamino CH_0, CH_1, ... CH_31)
     # Adatta questo filtro in base all'intestazione reale del tuo CSV
-    emg_columns = [col for col in df_emg.columns if 'CH_' in col]
     emg_columns = [col for col in df_emg.columns if 'CH_' in col or 'EMG_' in col]
     emg_data = df_emg[emg_columns].values
     
@@ -67,8 +66,8 @@ def run_offline_inference(emg_csv_path, model_path, output_csv_path):
     emg_buffer = np.zeros((64, 32), dtype=np.float32)
     ang_buffer = np.zeros((64, 24), dtype=np.float32)
     
-    # 4. Inizializzazione Filtro Passa-Basso (1 Hz su un campionamento di 81.92 Hz)
-    fs_output = 81.92
+    # 4. Inizializzazione Filtro Passa-Basso (1 Hz su campionamento RMS a 80.0 Hz effettivi)
+    fs_output = 80.0
     b, a = butter(4, 1.0 / (fs_output / 2.0), btype='low')
     zi = np.zeros((24, max(len(a), len(b)) - 1))
     

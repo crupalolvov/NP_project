@@ -5,7 +5,7 @@ import os
 import matplotlib.pyplot as plt
 from RPC_Net import RPCNet_Exact
 
-def plot_joint_errors(y_true: np.ndarray, y_pred: np.ndarray, dataset_name=""):
+def plot_joint_errors(y_true: np.ndarray, y_pred: np.ndarray, dataset_name="", output_dir="eval"):
     """
     Calcola e plotta l'RMSE per ogni Grado di Libertà.
     y_true, y_pred: array numpy di forma (n_campioni, 24)
@@ -37,9 +37,13 @@ def plot_joint_errors(y_true: np.ndarray, y_pred: np.ndarray, dataset_name=""):
         ax.text(bar.get_x() + bar.get_width()/2, yval + 0.01, f'{yval:.2f}', ha='center', va='bottom', fontsize=8, rotation=90)
 
     plt.tight_layout()
-    plt.show()
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, f"joint_errors_{dataset_name.replace('.pt', '').replace('.csv', '').replace(' ', '_')}.png")
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Grafico RMSE salvato in: {save_path}")
 
-def plot_trajectory(y_true: np.ndarray, y_pred: np.ndarray, dof_index: int = 0, dataset_name=""):
+def plot_trajectory(y_true: np.ndarray, y_pred: np.ndarray, dof_index: int = 0, dataset_name="", output_dir="eval"):
     """
     Plotta l'andamento temporale di un singolo DoF per confrontare visivamente
     le predizioni della rete rispetto ai valori reali.
@@ -53,9 +57,13 @@ def plot_trajectory(y_true: np.ndarray, y_pred: np.ndarray, dof_index: int = 0, 
     plt.legend()
     plt.grid(True, linestyle=':', alpha=0.7)
     plt.tight_layout()
-    plt.show()
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, f"trajectory_dof{dof_index}_{dataset_name.replace('.pt', '').replace('.csv', '').replace(' ', '_')}.png")
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Grafico traiettoria salvato in: {save_path}")
 
-def evaluate_tensors_directly(tensor_file, model_file):
+def evaluate_tensors_directly(tensor_file, model_file, output_dir):
     dataset_name = os.path.basename(tensor_file)
     print(f"\n--- Valutazione Diretta: {dataset_name} ---")
     try:
@@ -70,13 +78,13 @@ def evaluate_tensors_directly(tensor_file, model_file):
         with torch.no_grad():
             Y_pred = model(X_emg, X_ang)
             
-        plot_joint_errors(Y_target.numpy(), Y_pred.numpy(), dataset_name)
-        plot_trajectory(Y_target.numpy(), Y_pred.numpy(), dof_index=8, dataset_name=dataset_name)
+        plot_joint_errors(Y_target.numpy(), Y_pred.numpy(), dataset_name, output_dir)
+        plot_trajectory(Y_target.numpy(), Y_pred.numpy(), dof_index=8, dataset_name=dataset_name, output_dir=output_dir)
         
     except FileNotFoundError as e:
         print(f"Errore: {e}. Assicurati che i file esistano.")
 
-def evaluate_offline_inference(pred_csv_file, target_tensor_file):
+def evaluate_offline_inference(pred_csv_file, target_tensor_file, output_dir):
     dataset_name = "Offline Inference CSV"
     print(f"\n--- Valutazione da CSV: {dataset_name} ---")
     try:
@@ -98,8 +106,8 @@ def evaluate_offline_inference(pred_csv_file, target_tensor_file):
         
         print(f"Dati allineati! Campioni validi da confrontare: {min_len}")
         
-        plot_joint_errors(y_true, y_pred, dataset_name)
-        plot_trajectory(y_true, y_pred, dof_index=8, dataset_name=dataset_name)
+        plot_joint_errors(y_true, y_pred, dataset_name, output_dir)
+        plot_trajectory(y_true, y_pred, dof_index=8, dataset_name=dataset_name, output_dir=output_dir)
         
     except FileNotFoundError as e:
         print(f"Errore: {e}. Assicurati di aver generato '{pred_csv_file}' e '{target_tensor_file}'.")
@@ -108,6 +116,7 @@ def evaluate_offline_inference(pred_csv_file, target_tensor_file):
 if __name__ == "__main__":
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     FILE_MODELLO = os.path.join(BASE_DIR, "rpc_net_weights.pth")
+    EVAL_DIR = os.path.join(BASE_DIR, "eval")
     
     # =========================================================================
     # MODALITÀ 1: Valutazione diretta sui Tensori (Train, Val e Test)
@@ -117,11 +126,11 @@ if __name__ == "__main__":
     for ds_name in datasets_to_evaluate:
         file_dataset = os.path.join(BASE_DIR, ds_name)
         if os.path.exists(file_dataset):
-            evaluate_tensors_directly(file_dataset, FILE_MODELLO)
+            evaluate_tensors_directly(file_dataset, FILE_MODELLO, EVAL_DIR)
     
     # =========================================================================
     # MODALITÀ 2: Valutazione del file CSV prodotto da inference.py
     # =========================================================================
     # FILE_PRED_CSV = os.path.join(BASE_DIR, "predicted_kinematics_offline.csv")
     # FILE_TARGET_PT = os.path.join(BASE_DIR, "test_tensors.pt")
-    # evaluate_offline_inference(FILE_PRED_CSV, FILE_TARGET_PT)
+    # evaluate_offline_inference(FILE_PRED_CSV, FILE_TARGET_PT, EVAL_DIR)
