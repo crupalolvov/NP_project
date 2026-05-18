@@ -2,7 +2,142 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 import os
+from scipy.signal import savgol_filter
 import torch
+import matplotlib.pyplot as plt
+
+#Aggiungo limitazione delle distanze dei punti fra loro, operando dirrettamente sui dati originali!
+def preprocess_mediapipe_data(csv_path, anatomy, window_length=15, polyorder=3):
+    """
+    Pulisce i dati di MediaPipe eliminando outlier temporali 
+    e forzando la rigidità ossea SUL CORRETTO PIANO DI ROTAZIONE (1-DoF / 2-DoF).
+    """
+    print("--- AVVIO PRE-PROCESSING CINEMATICO (PLANARE RIGOROSO) ---")
+    df = pd.read_csv(csv_path)
+    num_frames = len(df)
+    
+    IMG_WIDTH = 640
+    IMG_HEIGHT = 480
+    
+    raw_lms = np.zeros((num_frames, 21, 3))
+    for f in range(num_frames):
+        row = df.iloc[f]
+        for i in range(21):
+            raw_lms[f, i] = [
+                row[f'LM_{i}_X'] * IMG_WIDTH, 
+                row[f'LM_{i}_Y'] * IMG_HEIGHT, 
+                row[f'LM_{i}_Z'] * IMG_WIDTH
+            ]
+            
+    print(f"1. Filtraggio temporale (Savitzky-Golay)...")
+    smoothed_lms = np.zeros_like(raw_lms)
+    for i in range(21):
+        for axis in range(3):
+            smoothed_lms[:, i, axis] = savgol_filter(raw_lms[:, i, axis], window_length, polyorder)
+            
+    print("2. Proiezione su scheletro rigido e cerniere anatomiche...")
+    fixed_lms = np.zeros_like(smoothed_lms)
+    
+    finger_defs = {
+        'Thumb':  ([1, 2, 3, 4],    ['Thumb_Proximal', 'Thumb_Intermediate', 'Thumb_Distal']),
+        'Index':  ([5, 6, 7, 8],    ['Index_Proximal', 'Index_Intermediate', 'Index_Distal']),
+        'Middle': ([9, 10, 11, 12], ['Middle_Proximal', 'Middle_Intermediate', 'Middle_Distal']),
+        'Ring':   ([13, 14, 15, 16],['Ring_Proximal', 'Ring_Intermediate', 'Ring_Distal']),
+        'Pinky':  ([17, 18, 19, 20],['Pinky_Proximal', 'Pinky_Intermediate', 'Pinky_Distal'])
+    }
+    
+    # Pre-calcoliamo i vettori globali del palmo
+    v_idx = anatomy['meta_vectors']['Index']
+    v_pnk = anatomy['meta_vectors']['Pinky']
+    v_mid = anatomy['meta_vectors']['Middle']
+    
+    X_palm = v_idx - v_pnk
+    X_palm /= (np.linalg.norm(X_palm) + 1e-8)
+    Z_palm = np.cross(X_palm, v_mid) # Normale del palmo (Dorsal direction nel paper)
+    Z_palm /= (np.linalg.norm(Z_palm) + 1e-8)
+    
+    for f in range(num_frames):
+        fixed_lms[f, 0] = smoothed_lms[f, 0] 
+        
+        for finger, (lms_idx, bone_names) in finger_defs.items():
+            # Inizializziamo l'asse di flessione (X_local)
+            Y_local = anatomy['meta_vectors'][finger].copy()
+            Y_local /= (np.linalg.norm(Y_local) + 1e-8)
+            
+            if finger == 'Thumb':
+                X_local = Z_palm.copy() 
+            else:
+                X_local = np.cross(Y_local, Z_palm)
+                if np.linalg.norm(X_local) < 1e-8:
+                    X_local = X_palm.copy()
+                X_local /= np.linalg.norm(X_local)
+                
+            # -- 1. SISTEMIAMO IL METACARPO --
+            mcp_idx = lms_idx[0]
+            dir_meta = smoothed_lms[f, mcp_idx] - fixed_lms[f, 0]
+            norm_meta = np.linalg.norm(dir_meta)
+            if norm_meta > 1e-6: dir_meta /= norm_meta
+            
+            len_meta = np.linalg.norm(anatomy['meta_vectors'][finger])
+            fixed_lms[f, mcp_idx] = fixed_lms[f, 0] + dir_meta * len_meta
+
+            # -- 2. SISTEMIAMO LE FALANGI (CON VINCOLI DoF DINAMICI) --
+            parent_idx = mcp_idx
+            current_X_flex = X_local # Asse cerniera attuale
+            
+            for i, child_idx in enumerate(lms_idx[1:]):
+                dir_bone = smoothed_lms[f, child_idx] - smoothed_lms[f, parent_idx]
+                
+                # IDENTIFICHIAMO I GIUNTI A 1-DoF (Cerniere pure - F-E)
+                # Dita: PIP (i=1) e DIP (i=2) sono 1-DoF. MCP (i=0) è 2-DoF.
+                # Pollice: IP (i=2) è 1-DoF. CMC e MCP sono 2-DoF.
+                is_1dof_hinge = (finger != 'Thumb' and i > 0) or (finger == 'Thumb' and i == 2)
+                
+                if is_1dof_hinge:
+                    # LA MAGIA CORRETTA: Rimuoviamo la deviazione laterale solo dalle cerniere PIP/DIP
+                    lateral_component = np.dot(dir_bone, current_X_flex)
+                    dir_bone = dir_bone - (lateral_component * current_X_flex)
+                
+                norm_bone = np.linalg.norm(dir_bone)
+                if norm_bone > 1e-6:
+                    dir_bone /= norm_bone
+                else:
+                    dir_bone = np.array([0.0, 1.0, 0.0]) 
+                
+                # AGGIORNAMENTO DINAMICO DELLA CERNIERA (Per il giunto successivo)
+                # Quando la falange prossimale ruota in Abduzione (2-DoF), 
+                # la cerniera della falange successiva si orienta di conseguenza!
+                if (finger != 'Thumb' and i == 0) or (finger == 'Thumb' and i == 1):
+                    # Il nuovo perno è ortogonale alla falange appena posizionata e al dorso del palmo
+                    new_X_flex = np.cross(dir_bone, Z_palm)
+                    if np.linalg.norm(new_X_flex) > 1e-6:
+                        current_X_flex = new_X_flex / np.linalg.norm(new_X_flex)
+                
+                len_bone = anatomy['lengths'][bone_names[i]]
+                fixed_lms[f, child_idx] = fixed_lms[f, parent_idx] + dir_bone * len_bone
+                parent_idx = child_idx 
+                
+    print("Pre-processing completato. Dati pronti per IKA.")
+    
+    # --- Salvataggio CSV ---
+    preprocessed_data = []
+    for f in range(num_frames):
+        row_dict = {}
+        if 'Timestamp_LSL' in df.columns:
+            row_dict['Timestamp_LSL'] = df.iloc[f]['Timestamp_LSL']
+        for i in range(21):
+            row_dict[f'LM_{i}_X'] = fixed_lms[f, i, 0] / IMG_WIDTH
+            row_dict[f'LM_{i}_Y'] = fixed_lms[f, i, 1] / IMG_HEIGHT
+            row_dict[f'LM_{i}_Z'] = fixed_lms[f, i, 2] / IMG_WIDTH
+        preprocessed_data.append(row_dict)
+        
+    df_preprocessed = pd.DataFrame(preprocessed_data)
+    out_csv = csv_path.replace('.csv', '_preprocessed.csv')
+    df_preprocessed.to_csv(out_csv, index=False)
+    print(f"Dati preprocessati normalizzati salvati in: {os.path.basename(out_csv)}")
+    
+    return fixed_lms    
+
 
 # --- 1. MATRICI DI ROTAZIONE RIGOROSE ---
 def Rx(theta):
@@ -30,10 +165,18 @@ def extract_anatomy_from_csv(csv_path, start_frame, end_frame):
     anatomy = {'lengths': {}, 'meta_vectors': {}}
     lms_history = np.zeros((num_frames, 21, 3))
     
+    # Dimensioni dell'immagine usata per la cattura per convertire in pixel
+    IMG_WIDTH = 640
+    IMG_HEIGHT = 480
+
     for i in range(num_frames):
         row = df.iloc[i]
         for lm in range(21):
-            lms_history[i, lm] = [row[f'LM_{lm}_X'], row[f'LM_{lm}_Y'], row[f'LM_{lm}_Z']]
+            lms_history[i, lm] = [
+                row[f'LM_{lm}_X'] * IMG_WIDTH, 
+                row[f'LM_{lm}_Y'] * IMG_HEIGHT, 
+                row[f'LM_{lm}_Z'] * IMG_WIDTH
+            ]
             
     lms_mean = np.mean(lms_history, axis=0)
     wrist_pos = lms_mean[0]
@@ -206,27 +349,27 @@ class CleanHandIKA:
         wrist_pos = target_lms[0]
         centered_targets = target_lms - wrist_pos
         
-        # 2. AUTO-SCALING (Normalizziamo la grandezza totale della mano di MediaPipe)
+        # 2. AUTO-SCALING
         target_dist = np.linalg.norm(centered_targets[9])
         model_dist = np.linalg.norm(self.fk.anatomy['meta_vectors']['Middle'])
         if target_dist > 1e-6:
             centered_targets = centered_targets / (target_dist / model_dist)
             
-        # 3. FILTRO STRUTTURALE (Proiezione sullo scheletro rigido)
-        # Questo elimina l'effetto "ossa di gomma" alla radice
-        centered_targets = self.enforce_rigid_skeleton(centered_targets)
+        # 3. FILTRO STRUTTURALE INTERNO
+        rigid_targets = self.enforce_rigid_skeleton(centered_targets)
             
         q_temp = np.copy(self.q_current)
-        
-        # Riduciamo la resistenza ora che i dati sono puliti e solidi
         lambda_reg = 100.0 
 
+        # =================================================================
+        # FASE 1: POLSO (Soglia Rescue in PIXEL)
+        # =================================================================
         def wrist_objective(q_wrist):
             q_test = np.copy(q_temp)
             q_test[0:3] = q_wrist
             pred = self.fk.forward(q_test)
             palm_lms = [1, 5, 9, 13, 17]
-            diff = (pred[palm_lms] - centered_targets[palm_lms]) * 1000.0
+            diff = pred[palm_lms] - rigid_targets[palm_lms]
             mse = np.sum(np.linalg.norm(diff, axis=1)**2)
             reg = lambda_reg * np.mean((q_wrist - self.q_current[0:3])**2)
             return mse + reg
@@ -235,8 +378,21 @@ class CleanHandIKA:
             fun=wrist_objective, x0=q_temp[0:3], method='SLSQP', bounds=self.wrist_bounds,
             options={'ftol': 1e-5, 'maxiter': 50}
         )
+        
+        # NUOVA SOGLIA: ~400 equivale a circa 9 pixel di errore medio per nocca.
+        if res_wrist.fun > 400.0:
+            res_wrist_rescue = minimize(
+                fun=wrist_objective, x0=np.zeros(3), method='SLSQP', bounds=self.wrist_bounds,
+                options={'ftol': 1e-5, 'maxiter': 50}
+            )
+            if res_wrist_rescue.fun < res_wrist.fun:
+                res_wrist = res_wrist_rescue
+
         q_temp[0:3] = res_wrist.x 
 
+        # =================================================================
+        # FASE 2 & 3: DITA (Con Rescue Indipendente)
+        # =================================================================
         finger_configs = {
             'Thumb':  (3, 8,   [2, 3, 4], self.thumb_bounds),
             'Index':  (8, 12,  [6, 7, 8], self.finger_bounds),
@@ -254,16 +410,13 @@ class CleanHandIKA:
                 weights = np.ones(len(lms_idx))
                 weights[-1] = 2.0 
                 
-                diff = (pred[lms_idx] - centered_targets[lms_idx]) * 1000.0
+                diff = pred[lms_idx] - rigid_targets[lms_idx]
                 mse = np.sum(weights * np.linalg.norm(diff, axis=1)**2)
                 
-                # Regolarizzazione temporale (smorzamento jitter)
                 reg = lambda_reg * np.mean((q_finger - self.q_current[start_idx:end_idx])**2)
                 
-                # FIX IDENTIFIABILITY: Accoppiamento tendineo PIP-DIP per stabilizzare il solutore
                 bio_constraint = 0.0
                 if finger != 'Thumb':
-                    # L'ultimo angolo del dito (DIP) deve essere circa 2/3 del precedente (PIP)
                     q_pip = q_finger[2]
                     q_dip = q_finger[3]
                     bio_constraint = 2000.0 * (q_dip - (0.66 * q_pip))**2
@@ -274,56 +427,98 @@ class CleanHandIKA:
                 fun=finger_objective, x0=q_temp[start_idx:end_idx], method='SLSQP',
                 bounds=bounds, options={'ftol': 1e-5, 'maxiter': 50}
             )
+            
+            # NUOVO RESCUE PER LE DITA: ~300 equivale a circa 8-9 pixel di errore per falange
+            if res_finger.fun > 300.0:
+                res_finger_rescue = minimize(
+                    fun=finger_objective, x0=np.zeros(len(bounds)), method='SLSQP',
+                    bounds=bounds, options={'ftol': 1e-5, 'maxiter': 50}
+                )
+                if res_finger_rescue.fun < res_finger.fun:
+                    res_finger = res_finger_rescue
+
             q_temp[start_idx:end_idx] = res_finger.x 
 
         self.q_current = q_temp
         return self.q_current
-# # ==========================================
-# # TEST 1: LA PROVA DI AUTO-CONSISTENZA
-# # ==========================================
-# if __name__ == "__main__":
-#     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-#     KIN_FILE = os.path.join(BASE_DIR, "recordings", "trial_1_Kinematics.csv") 
-    
-#     # Inizializza l'anatomia
-#     anatomy = extract_anatomy_from_csv(KIN_FILE, 540, 590)
-#     fk = CleanHandFK(anatomy)
-#     ika = CleanHandIKA(fk)
-    
-#     print("\n--- AVVIO TEST DI AUTO-CONSISTENZA (FK -> IK -> FK) ---")
-    
-#     # 1. Generiamo un set di angoli (q) biomeccanicamente verosimili per simulare una mano semi-chiusa
-#     q_true = np.zeros(24)
-#     q_true[0:3] = [0.2, -0.1, 0.0] # Polso leggermente flesso
-    
-#         # Flettiamo le dita in modo biologicamente coerente
-#     for i in range(4): 
-#         idx = 8 + (i * 4)
-#         q_true[idx]   = 1.2 # MCP Flex 
-#         q_true[idx+1] = 0.0 # MCP Abd
-#         q_true[idx+2] = 1.0 # PIP Flex
-#         q_true[idx+3] = 0.66 # DIP Flex (ESATTAMENTE IL 66% della PIP)
+
+
+# --- 4. SOLUTORE IK ROBOTICO (Damped Least Squares Jacobian) ---
+class JacobianIKA:
+    def __init__(self, fk_model):
+        self.fk = fk_model
+        self.num_dofs = 24
+        self.q_current = np.zeros(self.num_dofs)
+        self.lambda_dls = 0.5  # Fattore di smorzamento: impedisce alla matematica di esplodere vicino alle singolarità
         
-#     # 2. Generiamo i landmark PERFETTI da questi angoli tramite la nostra FK
-#     lms_perfect = fk.forward(q_true)
-    
-#     # 3. Chiediamo all'IKA di ritrovare gli angoli partendo solo dai landmark (mano aperta come x0)
-#     ika.q_current = np.zeros(24) 
-#     q_estimated = ika.solve(lms_perfect)
-    
-#     # 4. Generiamo la mano ricostruita per calcolare l'errore metrico
-#     lms_reconstructed = fk.forward(q_estimated)
-    
-#     error_mm = np.linalg.norm(lms_perfect - lms_reconstructed, axis=1) * 1000.0
-    
-#     print(f"\nRisultati Test di Auto-Consistenza:")
-#     print(f"Errore Massimo: {np.max(error_mm):.4f} mm")
-#     print(f"Errore Medio:   {np.mean(error_mm):.4f} mm")
-    
-#     if np.mean(error_mm) < 1.0:
-#         print("✅ MATEMATICA PERFETTA: Il tuo modello cinematico è inattaccabile. Se l'errore sui dati veri è alto, la colpa è 100% del rumore di MediaPipe.")
-#     else:
-#         print("❌ FALLIMENTO MATEMATICO: Il solutore IKA non riesce a chiudere la catena nemmeno con dati perfetti.")
+        # Pesi Biomeccanici: Diamo priorità assoluta al posizionamento del palmo, poi alle punte.
+        # Le articolazioni intermedie si adatteranno fluidamente lungo la catena.
+        weights = np.ones(21)
+        palm_idx = [0, 1, 5, 9, 13, 17]
+        tips_idx = [4, 8, 12, 16, 20]
+        weights[palm_idx] = 10.0  # Il polso è la fondazione, deve combaciare perfettamente
+        weights[tips_idx] = 3.0   # Le punte guidano la direzione
+        self.W = np.diag(np.repeat(weights, 3)) # Creiamo la matrice diagonale 63x63
+
+    def get_jacobian(self, q):
+        # Calcolo del Jacobiano Numerico (Derivate parziali per ogni grado di libertà)
+        delta = 1e-4
+        J = np.zeros((63, self.num_dofs))
+        f0 = self.fk.forward(q).flatten()
+        
+        for i in range(self.num_dofs):
+            q_step = np.copy(q)
+            q_step[i] += delta
+            f_step = self.fk.forward(q_step).flatten()
+            J[:, i] = (f_step - f0) / delta
+            
+        return J, f0
+
+    def solve(self, target_lms, iterations=20):
+        # 1. Centratura
+        wrist_pos = target_lms[0]
+        centered_targets = target_lms - wrist_pos
+        
+        # 2. Auto-scaling sulle proporzioni fisse
+        target_dist = np.linalg.norm(centered_targets[9])
+        model_dist = np.linalg.norm(self.fk.anatomy['meta_vectors']['Middle'])
+        if target_dist > 1e-6:
+            centered_targets = centered_targets / (target_dist / model_dist)
+            
+        target_flat = centered_targets.flatten()
+        q = np.copy(self.q_current)
+        
+        # 3. Ottimizzazione DLS (Levenberg-Marquardt Approach)
+        for step in range(iterations):
+            # Calcoliamo dove siamo e come muoverci (Jacobiano)
+            J, current_pos_flat = self.get_jacobian(q)
+            error = target_flat - current_pos_flat
+            
+            # Se l'errore è irrilevante, interrompiamo il calcolo per risparmiare tempo
+            if np.mean(np.abs(error)) < 0.5: 
+                break
+            
+            # Applichiamo i pesi biomeccanici
+            e_weighted = self.W @ error
+            J_weighted = self.W @ J
+            
+            # Calcolo della pseudo-inversa smorzata: (J^T * J + lambda^2 * I)^-1 * J^T
+            J_T = J_weighted.T
+            H = J_T @ J_weighted + (self.lambda_dls**2) * np.eye(self.num_dofs)
+            
+            # La magia della robotica: delta_q contiene i radianti esatti per abbattere l'errore
+            delta_q = np.linalg.inv(H) @ J_T @ e_weighted
+            
+            # Aggiorniamo gli angoli della mano (con un passo di 0.8 per evitare oscillazioni)
+            q = q + 0.8 * delta_q 
+            
+            # Reset di sicurezza: se al primo iteratore la mano è capovolta (errore enorme),
+            # azzeriamo il polso per permettere al Jacobiano di trovare la discesa giusta.
+            if step == 0 and np.mean(np.abs(e_weighted)) > 150.0:
+                q[0:3] = 0.0 
+
+        self.q_current = q
+        return q
 # ==========================================
 # TEST 2: TRACKING CONTINUO SUI DATI REALI
 # ==========================================
@@ -331,39 +526,145 @@ if __name__ == "__main__":
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     KIN_FILE = os.path.join(BASE_DIR, "recordings", "trial_3_Kinematics.csv") 
     
-    # 1. Inizializza l'anatomia sui frame di calibrazione estesi
     START_CALIB = 540
     END_CALIB = 590
     
-    anatomy = extract_anatomy_from_csv(KIN_FILE, START_CALIB, END_CALIB)
+    CALIB_FILE = os.path.join(BASE_DIR, "hand_calibration.pt")
+    
+    # 1. Estraiamo o carichiamo l'anatomia
+    if os.path.exists(CALIB_FILE):
+        print(f"Caricamento calibrazione anatomica esistente da: {os.path.basename(CALIB_FILE)}")
+        anatomy = torch.load(CALIB_FILE, weights_only=False)
+    else:
+        print("Calcolo della calibrazione anatomica dal file CSV...")
+        anatomy = extract_anatomy_from_csv(KIN_FILE, START_CALIB, END_CALIB)
+        torch.save(anatomy, CALIB_FILE)
+        print(f"Calibrazione anatomica salvata in: {os.path.basename(CALIB_FILE)}")
+    
+    # 2. PULIZIA TOTALE: passiamo il CSV e riceviamo un array perfetto in pixel
+    cleaned_landmarks_array = preprocess_mediapipe_data(KIN_FILE, anatomy)
+    df_orig = pd.read_csv(KIN_FILE)
+    
     fk = CleanHandFK(anatomy)
-    ika = CleanHandIKA(fk)
+    #ika = CleanHandIKA(fk)
+    ika = JacobianIKA(fk) # Proviamo anche il solutore Jacobiano su dati puliti, per vedere se riesce a migliorare ulteriormente l'errore (dovrebbe essere più fluido ma con errore medio simile)
     
-    TEST_FRAME = 1730 
-    print(f"\n--- AVVIO TRACKING CONTINUO SUI DATI REALI (Con Auto-Scaling) ---")
+    num_frames = len(cleaned_landmarks_array)
+    print(f"\n--- AVVIO TRACKING CONTINUO SUI DATI REALI (Dati Puliti) ---")
+    print(f"Elaborazione di {num_frames} frame. Potrebbe richiedere qualche minuto...")
     
-    df = pd.read_csv(KIN_FILE)
+    mean_errors = np.zeros(num_frames)
+    max_errors = np.zeros(num_frames)
     
-    # 2. Inseguiamo la mano frame per frame partendo da fine calibrazione
-    for f in range(END_CALIB, TEST_FRAME + 1):
-        row = df.iloc[f]
-        target_lms = np.zeros((21, 3))
-        for i in range(21):
-            target_lms[i] = [row[f'LM_{i}_X'], row[f'LM_{i}_Y'], row[f'LM_{i}_Z']]
-            
-        target_lms = target_lms - target_lms[0] # Centriamo il polso
+    ika_pred_data = []
+    IMG_WIDTH = 640
+    IMG_HEIGHT = 480
+    
+    # Inseguiamo la mano frame per frame processandoli tutti
+    for f in range(num_frames):
+        # PRENDIAMO I DATI DAL VETTORE PULITO E PROIETTATO!
+        target_lms = cleaned_landmarks_array[f].copy()
         
-        # Auto-Scaling anche per il calcolo dell'errore (rendiamo il confronto leale)
-        target_dist = np.linalg.norm(target_lms[9])
-        model_dist = np.linalg.norm(fk.anatomy['meta_vectors']['Middle'])
-        if target_dist > 1e-6:
-            target_lms = target_lms / (target_dist / model_dist)
+        wrist_pos = target_lms[0].copy()
+        target_lms = target_lms - wrist_pos # Centriamo il polso
+        
+        # L'Auto-Scaling esterno è stato rimosso perché i dati puliti 
+        # garantiscono già le perfette lunghezze metriche e le corrette proporzioni in pixel.
             
-        # Risolviamo sfruttando la memoria del frame precedente
+        # Risolviamo!
         q_sol = ika.solve(target_lms)
         
         # Log di controllo
-        if f % 100 == 0 or f == TEST_FRAME:
-            pred_lms = fk.forward(q_sol)
-            error_mm = np.linalg.norm(target_lms - pred_lms, axis=1) * 1000.0
-            print(f"Frame {f:04d} | Errore Medio: {np.mean(error_mm):.2f} mm | Errore Max: {np.max(error_mm):.2f} mm")
+        pred_lms = fk.forward(q_sol)
+        error_px = np.linalg.norm(target_lms - pred_lms, axis=1)
+        
+        # Riportiamo la mano nella posizione originale nello schermo per l'animazione
+        pred_lms_abs = pred_lms + wrist_pos
+        
+        # Prepariamo la riga per il nuovo CSV convertendo di nuovo in scala normalizzata [0-1]
+        row_dict = {}
+        if 'Timestamp_LSL' in df_orig.columns:
+            row_dict['Timestamp_LSL'] = df_orig.iloc[f]['Timestamp_LSL']
+        for i in range(21):
+            row_dict[f'LM_{i}_X'] = pred_lms_abs[i, 0] / IMG_WIDTH
+            row_dict[f'LM_{i}_Y'] = pred_lms_abs[i, 1] / IMG_HEIGHT
+            row_dict[f'LM_{i}_Z'] = pred_lms_abs[i, 2] / IMG_WIDTH
+        ika_pred_data.append(row_dict)
+        
+        mean_errors[f] = np.mean(error_px)
+        max_errors[f] = np.max(error_px)
+        
+        if f % 100 == 0:
+            print(f"Frame {f:04d}/{num_frames} | Errore Medio: {mean_errors[f]:.2f} px | Errore Max: {max_errors[f]:.2f} px")
+            
+    print(f"\nElaborazione completata. Errore Medio Globale: {np.mean(mean_errors):.2f} px")
+
+    # Salvataggio del nuovo CSV
+    df_ika_pred = pd.DataFrame(ika_pred_data)
+    out_csv = KIN_FILE.replace('.csv', '_IKA_predicted_lms.csv')
+    df_ika_pred.to_csv(out_csv, index=False)
+    print(f"Predizioni IKA salvate per l'animazione in: {os.path.basename(out_csv)}\n")
+
+    # Plot dell'errore nel tempo
+    plt.figure(figsize=(12, 6))
+    frames = np.arange(num_frames)
+    plt.plot(frames, mean_errors, label='Errore Medio (px)', color='blue')
+    plt.plot(frames, max_errors, label='Errore Massimo per frame (px)', color='red', alpha=0.3)
+    plt.axhline(y=np.mean(mean_errors), color='green', linestyle='--', label=f'Media Globale ({np.mean(mean_errors):.2f} px)')
+    
+    plt.title(f'Errore di Ricostruzione IKA nel tempo (Dati Pre-processati)\nFile: {os.path.basename(KIN_FILE)}')
+    plt.xlabel('Frame')
+    plt.ylabel('Errore (pixel)')
+    plt.legend()
+    plt.grid(True, linestyle=':', alpha=0.7)
+    plt.tight_layout()
+    plt.show()
+
+
+
+# ==========================================
+# TEST 1: LA PROVA DI AUTO-CONSISTENZA
+# ==========================================
+# if __name__ == "__main__":
+#     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+#     KIN_FILE = os.path.join(BASE_DIR, "recordings", "trial_1_Kinematics.csv") 
+#     
+#     # Inizializza l'anatomia
+#     anatomy = extract_anatomy_from_csv(KIN_FILE, 540, 590)
+#     fk = CleanHandFK(anatomy)
+#     ika = CleanHandIKA(fk)
+#     
+#     print("\n--- AVVIO TEST DI AUTO-CONSISTENZA (FK -> IK -> FK) ---")
+#     
+#     # 1. Generiamo un set di angoli (q) biomeccanicamente verosimili per simulare una mano semi-chiusa
+#     q_true = np.zeros(24)
+#     q_true[0:3] = [0.2, -0.1, 0.0] # Polso leggermente flesso
+#     
+#         # Flettiamo le dita in modo biologicamente coerente
+#     for i in range(4): 
+#         idx = 8 + (i * 4)
+#         q_true[idx]   = 1.2 # MCP Flex 
+#         q_true[idx+1] = 0.0 # MCP Abd
+#         q_true[idx+2] = 1.0 # PIP Flex
+#         q_true[idx+3] = 0.66 # DIP Flex (ESATTAMENTE IL 66% della PIP)
+#         
+#     # 2. Generiamo i landmark PERFETTI da questi angoli tramite la nostra FK
+#     lms_perfect = fk.forward(q_true)
+#     
+#     # 3. Chiediamo all'IKA di ritrovare gli angoli partendo solo dai landmark (mano aperta come x0)
+#     ika.q_current = np.zeros(24) 
+#     q_estimated = ika.solve(lms_perfect)
+#     
+#     # 4. Generiamo la mano ricostruita per calcolare l'errore metrico
+#     lms_reconstructed = fk.forward(q_estimated)
+#     
+#     error_px = np.linalg.norm(lms_perfect - lms_reconstructed, axis=1)
+#     
+#     print(f"\nRisultati Test di Auto-Consistenza:")
+#     print(f"Errore Massimo: {np.max(error_px):.4f} px")
+#     print(f"Errore Medio:   {np.mean(error_px):.4f} px")
+#     
+#     if np.mean(error_px) < 1.0:
+#         print("✅ MATEMATICA PERFETTA: Il tuo modello cinematico è inattaccabile. Se l'errore sui dati veri è alto, la colpa è 100% del rumore di MediaPipe.")
+#     else:
+#         print("❌ FALLIMENTO MATEMATICO: Il solutore IKA non riesce a chiudere la catena nemmeno con dati perfetti.")
