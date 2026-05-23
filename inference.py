@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 from scipy.signal import butter, lfilter
 import time
+import os
+from core_kin import CleanHandFK
 
 
 from RPC_Net import RPCNet_Exact
@@ -136,11 +138,65 @@ def run_offline_inference(emg_csv_path, model_path, output_csv_path):
     df_out.to_csv(output_csv_path, index=False)
     print(f"Predizioni salvate con successo in: {output_csv_path}")
 
+# --- 3. DECODIFICA IN COORDINATE 3D (FORWARD KINEMATICS) ---
+def decode_predictions_to_csv(pred_csv_path, calibration_file, output_lms_path):
+    print(f"\n--- AVVIO DECODIFICA FK (Angoli -> Coordinate 3D) ---")
+    df_pred = pd.read_csv(pred_csv_path)
+    
+    if not os.path.exists(calibration_file):
+        print(f"Errore: File di calibrazione '{calibration_file}' non trovato.")
+        return
+        
+    print(f"Caricamento calibrazione da: {calibration_file}")
+    anatomy = torch.load(calibration_file, weights_only=False)
+    fk = CleanHandFK(anatomy)
+    
+    num_frames = len(df_pred)
+    lms_data = []
+    pred_cols = [f'Pred_DoF_{i}' for i in range(24)]
+    
+    IMG_WIDTH = 640
+    IMG_HEIGHT = 480
+    
+    # Fissiamo il polso al centro dello schermo virtuale (per visualizzazione)
+    virtual_wrist_pos = np.array([IMG_WIDTH * 0.5, IMG_HEIGHT * 0.5, 0.0])
+    
+    for i in range(num_frames):
+        row = df_pred.iloc[i]
+        q_norm = row[pred_cols].values
+        
+        # 1. Denormalizzazione: [0, 1] -> Gradi Reali -> Radianti
+        q_deg = (q_norm * 240.0) - 150.0
+        q_rad = np.radians(q_deg)
+        
+        # 2. Cinematica Diretta
+        lms_3d = fk.forward(q_rad)
+        lms_3d_abs = lms_3d + virtual_wrist_pos
+        
+        row_out = {'Timestamp_LSL': row['Timestamp_LSL']}
+        for lm_idx in range(21):
+            row_out[f'LM_{lm_idx}_X'] = lms_3d_abs[lm_idx, 0] / IMG_WIDTH
+            row_out[f'LM_{lm_idx}_Y'] = lms_3d_abs[lm_idx, 1] / IMG_HEIGHT
+            row_out[f'LM_{lm_idx}_Z'] = lms_3d_abs[lm_idx, 2] / IMG_WIDTH
+            
+        lms_data.append(row_out)
+            
+    df_lms = pd.DataFrame(lms_data)
+    df_lms.to_csv(output_lms_path, index=False)
+    print(f"Coordinate decodificate salvate con successo in: {output_lms_path}\n")
+
 # --- ESECUZIONE ---
 if __name__ == "__main__":
-    # Assicurati di avere il modello addestrato e il dataset pronto
-    FILE_EMG_RMS = "NP_project/recordings/trial_3_EMG_RMS.csv" # Trial 3 ora è usato per il testing!
-    FILE_MODELLO = "NP_project/rpc_net_weights.pth"
-    FILE_OUTPUT = "NP_project/predicted_kinematics_offline.csv"
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     
-    run_offline_inference(FILE_EMG_RMS, FILE_MODELLO, FILE_OUTPUT)
+    FILE_EMG_RMS = os.path.join(BASE_DIR, "recordings", "trial_3_EMG_RMS.csv") 
+    FILE_MODELLO = os.path.join(BASE_DIR, "rpc_net_weights.pth")
+    FILE_OUTPUT_ANGLES = os.path.join(BASE_DIR, "predicted_kinematics_offline.csv")
+    FILE_CALIB = os.path.join(BASE_DIR, "hand_calibration.pt")
+    FILE_OUTPUT_LMS = os.path.join(BASE_DIR, "predicted_kinematics_lms.csv")
+    
+    # 1. Inferenza (EMG -> Angoli)
+    run_offline_inference(FILE_EMG_RMS, FILE_MODELLO, FILE_OUTPUT_ANGLES)
+    
+    # 2. Decodifica (Angoli -> Coordinate 3D MediaPipe)
+    decode_predictions_to_csv(FILE_OUTPUT_ANGLES, FILE_CALIB, FILE_OUTPUT_LMS)

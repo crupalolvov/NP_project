@@ -4,7 +4,7 @@ import torch
 import os
 from scipy.signal import butter, filtfilt, iirnotch
 from scipy.interpolate import interp1d
-from IKA import process_full_kinematics
+from core_kin import process_full_kinematics_core
 
 class BionicFeatureExtractor:
     def __init__(self, fs_emg=2000):
@@ -111,11 +111,11 @@ def main():
     # --- 1. DEFINIZIONE PERCORSI FILE ---
     # Ricava il percorso assoluto della cartella corrente dello script (NP_project)
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    EMG_FILE = os.path.join(BASE_DIR, "recordings/trial_3_EMG.csv")       # Usa trial_1 per TRAIN, trial_2 per VAL
-    KIN_FILE = os.path.join(BASE_DIR, "recordings/trial_3_Kinematics.csv") 
-    OUTPUT_FILE = os.path.join(BASE_DIR, "test_tensors.pt") # Cambia in val_tensors.pt quando processi il trial_2
+    EMG_FILE = os.path.join(BASE_DIR, "recordings/trial_1_EMG.csv")       # Usa trial_1 per TRAIN, trial_2 per VAL
+    KIN_FILE = os.path.join(BASE_DIR, "recordings/trial_1_Kinematics.csv") 
+    OUTPUT_FILE = os.path.join(BASE_DIR, "train_tensors.pt") # Cambia in val_tensors.pt quando processi il trial_2
     
-    KIN_IKA_FILE = KIN_FILE.replace('.csv', '_IKA_24DoF_v7.csv')
+    KIN_IKA_FILE = KIN_FILE.replace('.csv', '_core_IKA_24DoF.csv')
     
     try:
         df_emg = pd.read_csv(EMG_FILE)
@@ -125,7 +125,7 @@ def main():
         if 'LM_0_X' in df_kin_raw.columns:
             if not os.path.exists(KIN_IKA_FILE):
                 print(f"File IKA non trovato. Avvio calcolo IKA automatico su {KIN_FILE}...")
-                process_full_kinematics(KIN_FILE)
+                process_full_kinematics_core(KIN_FILE)
             else:
                 print(f"File IKA già presente: {KIN_IKA_FILE}. Salto il calcolo per risparmiare tempo.")
             df_kin = pd.read_csv(KIN_IKA_FILE)

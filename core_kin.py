@@ -6,13 +6,52 @@ from scipy.signal import savgol_filter
 import torch
 import matplotlib.pyplot as plt
 
+# --- Helper function for Rodrigues' rotation ---
+def rotate_vector_by_rodrigues(v, k, theta):
+    """
+    Rotates vector v around axis k by angle theta using Rodrigues' rotation formula.
+    v: vector to rotate
+    k: rotation axis (unit vector)
+    theta: rotation angle (radians)
+    """
+    # Ensure k is a unit vector, add epsilon for safety against division by zero if k is near zero
+    norm_k = np.linalg.norm(k)
+    k_unit = k / (norm_k + 1e-8) if norm_k > 1e-8 else np.array([0.0, 0.0, 1.0]) # Fallback to Z-axis if k is zero
+    v_rot = v * np.cos(theta) + np.cross(k_unit, v) * np.sin(theta) + k_unit * np.dot(k_unit, v) * (1 - np.cos(theta))
+    return v_rot
+
 #Aggiungo limitazione delle distanze dei punti fra loro, operando dirrettamente sui dati originali!
 def preprocess_mediapipe_data(csv_path, anatomy, window_length=15, polyorder=3):
     """
     Pulisce i dati di MediaPipe eliminando outlier temporali 
-    e forzando la rigidità ossea SUL CORRETTO PIANO DI ROTAZIONE (1-DoF / 2-DoF).
+    e forzando la rigidità ossea SUL CORRETTO PIANO DI ROTAZIONE con limiti RoM.
     """
-    print("--- AVVIO PRE-PROCESSING CINEMATICO (PLANARE RIGOROSO) ---")
+    # Dizionari estratti dall'anatomia (Stillfried et al.)
+    min_flexion_bounds = {
+        'Thumb_IP': -0.26,   
+        'Index_PIP': -0.09,  
+        'Index_DIP': -0.17,  
+        'Middle_PIP': -0.09, 
+        'Middle_DIP': -0.17, 
+        'Ring_PIP': -0.09,   
+        'Ring_DIP': -0.17,   
+        'Pinky_PIP': -0.09,  
+        'Pinky_DIP': -0.17,  
+    }
+
+    max_flexion_bounds = {
+        'Thumb_IP': 1.54,    
+        'Index_PIP': 2.03,   
+        'Index_DIP': 1.59,   
+        'Middle_PIP': 2.05,  
+        'Middle_DIP': 1.76,  
+        'Ring_PIP': 2.07,    
+        'Ring_DIP': 1.46,    
+        'Pinky_PIP': 1.98,   
+        'Pinky_DIP': 1.44,   
+    }
+
+    print("--- AVVIO PRE-PROCESSING CINEMATICO (PLANARE RIGOROSO CON HARD-CLAMP) ---")
     df = pd.read_csv(csv_path)
     num_frames = len(df)
     
@@ -46,30 +85,43 @@ def preprocess_mediapipe_data(csv_path, anatomy, window_length=15, polyorder=3):
         'Pinky':  ([17, 18, 19, 20],['Pinky_Proximal', 'Pinky_Intermediate', 'Pinky_Distal'])
     }
     
-    # Pre-calcoliamo i vettori globali del palmo
-    v_idx = anatomy['meta_vectors']['Index']
-    v_pnk = anatomy['meta_vectors']['Pinky']
-    v_mid = anatomy['meta_vectors']['Middle']
-    
-    X_palm = v_idx - v_pnk
-    X_palm /= (np.linalg.norm(X_palm) + 1e-8)
-    Z_palm = np.cross(X_palm, v_mid) # Normale del palmo (Dorsal direction nel paper)
-    Z_palm /= (np.linalg.norm(Z_palm) + 1e-8)
     
     for f in range(num_frames):
-        fixed_lms[f, 0] = smoothed_lms[f, 0] 
+        fixed_lms[f, 0] = smoothed_lms[f, 0]
+        # 1. Ricalcoliamo il sistema di riferimento del palmo DINAMICAMENTE
+        v_idx_f = smoothed_lms[f, 5] - smoothed_lms[f, 0]
+        v_mid_f = smoothed_lms[f, 9] - smoothed_lms[f, 0]
+        v_pnk_f = smoothed_lms[f, 17] - smoothed_lms[f, 0]
+        
+        X_palm_f = v_idx_f - v_pnk_f
+        X_palm_f /= (np.linalg.norm(X_palm_f) + 1e-8)
+        Z_palm_f = np.cross(X_palm_f, v_mid_f) 
+        Z_palm_f /= (np.linalg.norm(Z_palm_f) + 1e-8)
+
+        # --- LOGICA POLLICE DINAMICA ---
+        thumb_lms = smoothed_lms[f, 1:5] 
+        # Definizione dell'asse flessione del Pollice (X_thumb)
+        # Il pollice ruota su un asse ortogonale al piano Z_palm e alla direzione MCP-IP
+        v_mcp_ip = thumb_lms[2] - thumb_lms[1]
+        X_thumb = np.cross(Z_palm_f, v_mcp_ip)
+        X_thumb /= (np.linalg.norm(X_thumb) + 1e-8)
         
         for finger, (lms_idx, bone_names) in finger_defs.items():
-            # Inizializziamo l'asse di flessione (X_local)
-            Y_local = anatomy['meta_vectors'][finger].copy()
-            Y_local /= (np.linalg.norm(Y_local) + 1e-8)
+            # 2. Ricalcoliamo l'asse della cerniera base per questo specifico frame
+            Y_local_f = smoothed_lms[f, lms_idx[0]] - fixed_lms[f, 0]
+            Y_local_f /= (np.linalg.norm(Y_local_f) + 1e-8)
             
             if finger == 'Thumb':
-                X_local = Z_palm.copy() 
+                X_local = Z_palm_f.copy() # Pollice: l'asse di flessione è la normale al palmo
+                # Ortogonalizziamo per allinearci perfettamente a R_splay di CleanHandFK
+                Z_local_t = np.cross(X_local, Y_local_f)
+                Z_local_t /= (np.linalg.norm(Z_local_t) + 1e-8)
+                X_local = np.cross(Y_local_f, Z_local_t)
+                X_local /= (np.linalg.norm(X_local) + 1e-8)
             else:
-                X_local = np.cross(Y_local, Z_palm)
+                X_local = np.cross(Y_local_f, Z_palm_f)
                 if np.linalg.norm(X_local) < 1e-8:
-                    X_local = X_palm.copy()
+                    X_local = X_palm_f.copy()
                 X_local /= np.linalg.norm(X_local)
                 
             # -- 1. SISTEMIAMO IL METACARPO --
@@ -79,43 +131,84 @@ def preprocess_mediapipe_data(csv_path, anatomy, window_length=15, polyorder=3):
             if norm_meta > 1e-6: dir_meta /= norm_meta
             
             len_meta = np.linalg.norm(anatomy['meta_vectors'][finger])
-            fixed_lms[f, mcp_idx] = fixed_lms[f, 0] + dir_meta * len_meta
+            fixed_lms[f, mcp_idx] = fixed_lms[f, 0] + (dir_meta * len_meta)
 
             # -- 2. SISTEMIAMO LE FALANGI (CON VINCOLI DoF DINAMICI) --
             parent_idx = mcp_idx
-            current_X_flex = X_local # Asse cerniera attuale
-            
+            current_hinge_axis = X_local 
+            prev_bone_dir_normalized = dir_meta.copy() 
+
             for i, child_idx in enumerate(lms_idx[1:]):
-                dir_bone = smoothed_lms[f, child_idx] - smoothed_lms[f, parent_idx]
-                
+                dir_bone = smoothed_lms[f, child_idx] - smoothed_lms[f, parent_idx] 
+
                 # IDENTIFICHIAMO I GIUNTI A 1-DoF (Cerniere pure - F-E)
-                # Dita: PIP (i=1) e DIP (i=2) sono 1-DoF. MCP (i=0) è 2-DoF.
-                # Pollice: IP (i=2) è 1-DoF. CMC e MCP sono 2-DoF.
                 is_1dof_hinge = (finger != 'Thumb' and i > 0) or (finger == 'Thumb' and i == 2)
                 
+                # --- FASE 1: APPLICAZIONE DEL VINCOLO ---
                 if is_1dof_hinge:
-                    # LA MAGIA CORRETTA: Rimuoviamo la deviazione laterale solo dalle cerniere PIP/DIP
-                    lateral_component = np.dot(dir_bone, current_X_flex)
-                    dir_bone = dir_bone - (lateral_component * current_X_flex)
+                    # Rimuoviamo la deviazione laterale usando l'asse del giunto ATTUALE
+                    lateral_component = np.dot(dir_bone, current_hinge_axis)
+                    dir_bone = dir_bone - (lateral_component * current_hinge_axis)
                 
-                norm_bone = np.linalg.norm(dir_bone)
-                if norm_bone > 1e-6:
+                # --- FASE 2: NORMALIZZAZIONE DEL VETTORE PULITO ---
+                norm_bone = np.linalg.norm(dir_bone) 
+                if norm_bone > 1e-6: 
                     dir_bone /= norm_bone
-                else:
-                    dir_bone = np.array([0.0, 1.0, 0.0]) 
-                
-                # AGGIORNAMENTO DINAMICO DELLA CERNIERA (Per il giunto successivo)
-                # Quando la falange prossimale ruota in Abduzione (2-DoF), 
-                # la cerniera della falange successiva si orienta di conseguenza!
-                if (finger != 'Thumb' and i == 0) or (finger == 'Thumb' and i == 1):
-                    # Il nuovo perno è ortogonale alla falange appena posizionata e al dorso del palmo
-                    new_X_flex = np.cross(dir_bone, Z_palm)
-                    if np.linalg.norm(new_X_flex) > 1e-6:
-                        current_X_flex = new_X_flex / np.linalg.norm(new_X_flex)
-                
+                else: 
+                    print(f"ATTENZIONE: dir_bone nullo o quasi nullo al frame {f}, dito {finger}, osso {bone_names[i]}. Usato fallback [0, 1, 0].")
+                    dir_bone = np.array([0.0, 1.0, 0.0]) # Fallback
+
+                # --- FASE 2.5: ENFORCEMENT LIMITI DI FLESSIONE (per giunti a 1-DoF) ---
+                # --- CLAMPING BIOMECCANICO GLOBALE ---
+                if is_1dof_hinge:
+                    joint_name_for_bounds = None
+                    if finger == 'Thumb' and i == 2: 
+                        joint_name_for_bounds = 'Thumb_IP'
+                    elif finger != 'Thumb': 
+                        if i == 1: joint_name_for_bounds = f'{finger}_PIP'
+                        elif i == 2: joint_name_for_bounds = f'{finger}_DIP'
+                    
+                    if joint_name_for_bounds and joint_name_for_bounds in min_flexion_bounds:
+                        min_rad = min_flexion_bounds[joint_name_for_bounds]
+                        max_rad = max_flexion_bounds[joint_name_for_bounds]
+
+                        if 'DIP' in joint_name_for_bounds:
+                            max_rad *= 1.15
+                            
+                        flexion_y_axis = np.cross( prev_bone_dir_normalized, current_hinge_axis) # in questo ordine per avere verso Y corretto!
+                        flexion_y_axis /= (np.linalg.norm(flexion_y_axis) + 1e-8)
+                        
+                        x_comp = np.dot(dir_bone, prev_bone_dir_normalized)
+                        y_comp = np.dot(dir_bone, flexion_y_axis)
+                        current_flexion_angle = np.arctan2(y_comp, x_comp)
+                        
+                        # Se l'angolo sfora uno dei limiti (iperextensione o iperflessione), forziamolo entro il Range of Motion
+                        if current_flexion_angle < min_rad or current_flexion_angle > max_rad:
+                            # Invece di clip netta, portiamo il valore verso il limite con un fattore di smorzamento (es. 0.3)
+                            target = np.clip(current_flexion_angle, min_rad, max_rad)
+                            current_flexion_angle = 0.7 * current_flexion_angle + 0.3 * target
+                            
+                            dir_bone = (prev_bone_dir_normalized * np.cos(current_flexion_angle)) + (flexion_y_axis * np.sin(current_flexion_angle))
+                            dir_bone /= np.linalg.norm(dir_bone)
+                                
+                # --- FASE 3: TRASPORTO DELL'ASSE ---
+                # Utilizziamo Rodrigues per TUTTE le dita, incluso il pollice!
+                # Questo propaga l'asse esattamente come le matrici in CleanHandFK.
+                rotation_axis = np.cross(prev_bone_dir_normalized, dir_bone)
+                norm_rot_axis = np.linalg.norm(rotation_axis)
+                if norm_rot_axis > 1e-8:
+                    rotation_axis /= norm_rot_axis
+                    dot_product = np.clip(np.dot(prev_bone_dir_normalized, dir_bone), -1.0, 1.0)
+                    angle = np.arccos(dot_product)
+                    current_hinge_axis = rotate_vector_by_rodrigues(current_hinge_axis, rotation_axis, angle)
+
+                # --- FASE 4: RICOSTRUZIONE POSIZIONALE ---
                 len_bone = anatomy['lengths'][bone_names[i]]
                 fixed_lms[f, child_idx] = fixed_lms[f, parent_idx] + dir_bone * len_bone
+                
+                # --- FASE 5: AGGIORNAMENTO VARIABILI DI STATO ---
                 parent_idx = child_idx 
+                prev_bone_dir_normalized = dir_bone.copy() # È fondamentale salvare il vettore PULITO
                 
     print("Pre-processing completato. Dati pronti per IKA.")
     
@@ -621,50 +714,53 @@ if __name__ == "__main__":
     plt.show()
 
 
-
-# ==========================================
-# TEST 1: LA PROVA DI AUTO-CONSISTENZA
-# ==========================================
-# if __name__ == "__main__":
-#     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-#     KIN_FILE = os.path.join(BASE_DIR, "recordings", "trial_1_Kinematics.csv") 
-#     
-#     # Inizializza l'anatomia
-#     anatomy = extract_anatomy_from_csv(KIN_FILE, 540, 590)
-#     fk = CleanHandFK(anatomy)
-#     ika = CleanHandIKA(fk)
-#     
-#     print("\n--- AVVIO TEST DI AUTO-CONSISTENZA (FK -> IK -> FK) ---")
-#     
-#     # 1. Generiamo un set di angoli (q) biomeccanicamente verosimili per simulare una mano semi-chiusa
-#     q_true = np.zeros(24)
-#     q_true[0:3] = [0.2, -0.1, 0.0] # Polso leggermente flesso
-#     
-#         # Flettiamo le dita in modo biologicamente coerente
-#     for i in range(4): 
-#         idx = 8 + (i * 4)
-#         q_true[idx]   = 1.2 # MCP Flex 
-#         q_true[idx+1] = 0.0 # MCP Abd
-#         q_true[idx+2] = 1.0 # PIP Flex
-#         q_true[idx+3] = 0.66 # DIP Flex (ESATTAMENTE IL 66% della PIP)
-#         
-#     # 2. Generiamo i landmark PERFETTI da questi angoli tramite la nostra FK
-#     lms_perfect = fk.forward(q_true)
-#     
-#     # 3. Chiediamo all'IKA di ritrovare gli angoli partendo solo dai landmark (mano aperta come x0)
-#     ika.q_current = np.zeros(24) 
-#     q_estimated = ika.solve(lms_perfect)
-#     
-#     # 4. Generiamo la mano ricostruita per calcolare l'errore metrico
-#     lms_reconstructed = fk.forward(q_estimated)
-#     
-#     error_px = np.linalg.norm(lms_perfect - lms_reconstructed, axis=1)
-#     
-#     print(f"\nRisultati Test di Auto-Consistenza:")
-#     print(f"Errore Massimo: {np.max(error_px):.4f} px")
-#     print(f"Errore Medio:   {np.mean(error_px):.4f} px")
-#     
-#     if np.mean(error_px) < 1.0:
-#         print("✅ MATEMATICA PERFETTA: Il tuo modello cinematico è inattaccabile. Se l'errore sui dati veri è alto, la colpa è 100% del rumore di MediaPipe.")
-#     else:
-#         print("❌ FALLIMENTO MATEMATICO: Il solutore IKA non riesce a chiudere la catena nemmeno con dati perfetti.")
+# FUNZIONE FINALE PER FEATURE EXTRACTION
+def process_full_kinematics_core(csv_path):
+    print("Avvio Pipeline Preprocessing + IKA (Jacobian)...")
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    CALIB_FILE = os.path.join(BASE_DIR, "hand_calibration.pt")
+    
+    if os.path.exists(CALIB_FILE):
+        print(f"Caricamento calibrazione anatomica da: {os.path.basename(CALIB_FILE)}")
+        anatomy = torch.load(CALIB_FILE, weights_only=False)
+    else:
+        print(f"Errore: File di calibrazione '{CALIB_FILE}' non trovato!")
+        return None
+    
+    # 1. Preprocessing (Pulizia e Rigidità)
+    cleaned_landmarks_array = preprocess_mediapipe_data(csv_path, anatomy)
+    df_orig = pd.read_csv(csv_path)
+    
+    # 2. IKA
+    fk = CleanHandFK(anatomy)
+    ika = JacobianIKA(fk)
+    
+    num_frames = len(cleaned_landmarks_array)
+    angles_data = []
+    
+    print(f"\n--- AVVIO TRACKING IKA SUI DATI PREPROCESSATI ---")
+    
+    for f in range(num_frames):
+        target_lms = cleaned_landmarks_array[f].copy()
+        wrist_pos = target_lms[0].copy()
+        target_lms = target_lms - wrist_pos # Centriamo il polso
+        
+        q_sol = ika.solve(target_lms)
+        
+        row_dict = {}
+        if 'Timestamp_LSL' in df_orig.columns:
+            row_dict['Timestamp_LSL'] = df_orig.iloc[f]['Timestamp_LSL']
+            
+        for i in range(24):
+            row_dict[f'DoF_{i}'] = np.degrees(q_sol[i]) # Feature extractor si aspetta gradi
+            
+        angles_data.append(row_dict)
+        
+        if f % 100 == 0 and f > 0:
+            print(f"Processati {f:04d}/{num_frames} frame per IKA...")
+            
+    df_angles = pd.DataFrame(angles_data)
+    out_csv = csv_path.replace('.csv', '_core_IKA_24DoF.csv')
+    df_angles.to_csv(out_csv, index=False)
+    print(f"Dati IKA (Gradi) salvati in: {os.path.basename(out_csv)}\n")
+    return out_csv

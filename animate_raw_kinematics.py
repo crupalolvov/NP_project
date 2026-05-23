@@ -15,95 +15,99 @@ CONNECTIONS = [
     (5, 9), (9, 13), (13, 17)              # Palmo
 ]
 
-def visualize_raw_csv(csv_path, csv_path2=None, step=1):
-    print(f"Caricamento dati da {os.path.basename(csv_path)}...")
-    df1 = pd.read_csv(csv_path)
+def visualize_raw_csv(csv_path, csv_path2=None, csv_path3=None, step=1):
+    csv_paths = [csv_path, csv_path2, csv_path3]
+    labels = ["Original", "Processed", "Third"]
     
-    # Estraiamo solo un frame ogni 'step' per velocizzare l'animazione (~40 fps)
-    df1 = df1.iloc[::step].reset_index(drop=True)
+    frames_data_list = []
+    titles = []
     
-    num_frames = len(df1)
-    
-    frames_data1 = np.zeros((num_frames, 21, 3))
-    for i in range(21):
-        frames_data1[:, i, 0] = df1[f'LM_{i}_X'].values
-        frames_data1[:, i, 1] = df1[f'LM_{i}_Y'].values
-        frames_data1[:, i, 2] = df1[f'LM_{i}_Z'].values
-
-    frames_data2 = None
-    if csv_path2 and os.path.exists(csv_path2):
-        print(f"Caricamento dati secondari da {os.path.basename(csv_path2)}...")
-        df2 = pd.read_csv(csv_path2)
-        df2 = df2.iloc[::step].reset_index(drop=True)
-        num_frames = min(num_frames, len(df2))
-        frames_data2 = np.zeros((len(df2), 21, 3))
-        for i in range(21):
-            frames_data2[:, i, 0] = df2[f'LM_{i}_X'].values
-            frames_data2[:, i, 1] = df2[f'LM_{i}_Y'].values
-            frames_data2[:, i, 2] = df2[f'LM_{i}_Z'].values
-
+    num_frames = float('inf')
+    for path, label in zip(csv_paths, labels):
+        if path and os.path.exists(path):
+            print(f"Caricamento dati da {os.path.basename(path)}...")
+            df = pd.read_csv(path)
+            df = df.iloc[::step].reset_index(drop=True)
+            num_frames = min(num_frames, len(df))
+            
+            data = np.zeros((len(df), 21, 3))
+            for i in range(21):
+                data[:, i, 0] = df[f'LM_{i}_X'].values
+                data[:, i, 1] = df[f'LM_{i}_Y'].values
+                data[:, i, 2] = df[f'LM_{i}_Z'].values
+            frames_data_list.append(data)
+            titles.append(f"{label}: {os.path.basename(path)}")
+            
+    num_plots = len(frames_data_list)
+    if num_plots == 0:
+        print("Nessun dato da visualizzare.")
+        return
+        
     print(f"Fotogrammi da animare: {num_frames}")
 
-    # ================= FIGURA 1 =================
-    fig1 = plt.figure(figsize=(8, 8))
-    fig1.canvas.manager.set_window_title(f"Animazione 1: {os.path.basename(csv_path)}")
+    # ================= SETUP FIGURE =================
+    fig1 = plt.figure(figsize=(6 * num_plots, 8))
+    fig1.canvas.manager.set_window_title("Animazione Kinematics")
     fig1.subplots_adjust(bottom=0.2) # Creiamo spazio in basso per lo slider
-    ax1 = fig1.add_subplot(111, projection='3d')
     
-    # Limiti: X, Y in MediaPipe sono normalizzati da 0 a 1.
-    ax1.set_xlim(0, 1)
-    ax1.set_ylim(1, 0)  # INVERTITO: Nei video Y=0 è il bordo superiore!
-    ax1.set_zlim(-0.2, 0.2)
-    ax1.set_xlabel('X (Larghezza Video)')
-    ax1.set_ylabel('Y (Altezza Video)')
-    ax1.set_zlabel('Z (Profondità stimata MP)')
-    ax1.set_title(f"Kinematics: {os.path.basename(csv_path)}")
+    axes = []
+    scatters = []
+    lines_list = []
+    
+    colors_scatter = ['red', 'green', 'purple']
+    colors_lines = ['blue', 'orange', 'cyan']
 
-    scatter1 = ax1.scatter([], [], [], c='red', s=30, alpha=0.8)
-    lines1 = [ax1.plot([], [], [], c='blue', linewidth=2.5)[0] for _ in range(len(CONNECTIONS))]
-
-    # ================= FIGURA 2 =================
-    fig2 = None
-    scatter2 = None
-    lines2 = None
-    if frames_data2 is not None:
-        fig2 = plt.figure(figsize=(8, 8))
-        fig2.canvas.manager.set_window_title(f"Animazione 2: {os.path.basename(csv_path2)}")
-        ax2 = fig2.add_subplot(111, projection='3d')
+    for i in range(num_plots):
+        ax = fig1.add_subplot(1, num_plots, i + 1, projection='3d')
         
-        ax2.set_xlim(0, 1)
-        ax2.set_ylim(1, 0)
-        ax2.set_zlim(-0.2, 0.2)
-        ax2.set_xlabel('X (Larghezza Video)')
-        ax2.set_ylabel('Y (Altezza Video)')
-        ax2.set_zlabel('Z (Profondità stimata MP)')
-        ax2.set_title(f"Kinematics: {os.path.basename(csv_path2)}")
+        # Limiti: X, Y in MediaPipe sono normalizzati da 0 a 1.
+        ax.set_xlim(0, 1)
+        ax.set_ylim(1, 0) # INVERTITO: Nei video Y=0 è il bordo superiore!
+        ax.set_zlim(-0.2, 0.2)
+        ax.set_box_aspect([1, 1, 1]) # Forza le proporzioni ad essere identiche
+        ax.set_xlabel('X (Larghezza Video)')
+        ax.set_ylabel('Y (Altezza Video)')
+        ax.set_zlabel('Z (Profondità stimata MP)')
+        ax.set_title(titles[i])
+        
+        scatter = ax.scatter([], [], [], c=colors_scatter[i], s=30, alpha=0.8)
+        lines = [ax.plot([], [], [], c=colors_lines[i], linewidth=2.5)[0] for _ in range(len(CONNECTIONS))]
+        
+        axes.append(ax)
+        scatters.append(scatter)
+        lines_list.append(lines)
 
-        scatter2 = ax2.scatter([], [], [], c='green', s=30, alpha=0.8)
-        lines2 = [ax2.plot([], [], [], c='orange', linewidth=2.5)[0] for _ in range(len(CONNECTIONS))]
+    if num_plots > 1:
+        def sync_axes(event):
+            if event.inaxes in axes:
+                source_ax = event.inaxes
+                for ax in axes:
+                    if ax != source_ax:
+                        needs_update = False
+                        if ax.elev != source_ax.elev or ax.azim != source_ax.azim:
+                            ax.view_init(elev=source_ax.elev, azim=source_ax.azim)
+                            needs_update = True
+                        if hasattr(ax, 'dist') and hasattr(source_ax, 'dist') and ax.dist != source_ax.dist:
+                            ax.dist = source_ax.dist
+                            needs_update = True
+                        if needs_update:
+                            fig1.canvas.draw_idle()
+            
+        fig1.canvas.mpl_connect('motion_notify_event', sync_axes)
+        fig1.canvas.mpl_connect('scroll_event', sync_axes) # Sincronizza anche lo zoom
 
     def update(frame_idx):
         idx = int(frame_idx)
-        data1 = frames_data1[idx]
-        # Aggiorna Figura 1
-        scatter1._offsets3d = (data1[:, 0], data1[:, 1], data1[:, 2])
-        for line, (i, j) in zip(lines1, CONNECTIONS):
-            line.set_data([data1[i, 0], data1[j, 0]], [data1[i, 1], data1[j, 1]])
-            line.set_3d_properties([data1[i, 2], data1[j, 2]])
-            
-        # Aggiorna Figura 2
-        if fig2 is not None:
-            data2 = frames_data2[idx]
-            scatter2._offsets3d = (data2[:, 0], data2[:, 1], data2[:, 2])
-            for line, (i, j) in zip(lines2, CONNECTIONS):
-                line.set_data([data2[i, 0], data2[j, 0]], [data2[i, 1], data2[j, 1]])
-                line.set_3d_properties([data2[i, 2], data2[j, 2]])
-            try:
-                fig2.canvas.draw_idle()
-            except:
-                pass
-            
-        return [scatter1] + lines1
+        drawn_artists = []
+        for i in range(num_plots):
+            data = frames_data_list[i][idx]
+            scatters[i]._offsets3d = (data[:, 0], data[:, 1], data[:, 2])
+            for line, (u, v) in zip(lines_list[i], CONNECTIONS):
+                line.set_data([data[u, 0], data[v, 0]], [data[u, 1], data[v, 1]])
+                line.set_3d_properties([data[u, 2], data[v, 2]])
+            drawn_artists.append(scatters[i])
+            drawn_artists.extend(lines_list[i])
+        return drawn_artists
 
     # Aggiunta Slider e Pulsante solo su Figura 1
     ax_slider = fig1.add_axes([0.15, 0.05, 0.65, 0.03])
@@ -140,18 +144,23 @@ def visualize_raw_csv(csv_path, csv_path2=None, step=1):
 
     def animate(frame_idx):
         slider.set_val(frame_idx)
-        return [scatter1] + lines1
+        drawn_artists = []
+        for i in range(num_plots):
+            drawn_artists.append(scatters[i])
+            drawn_artists.extend(lines_list[i])
+        return drawn_artists
 
     ani = animation.FuncAnimation(fig1, animate, frames=frame_generator, interval=30, blit=False, cache_frame_data=False)
     plt.show()
 
 if __name__ == "__main__":
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    CSV_FILE_1 = os.path.join(BASE_DIR, "recordings", "trial_3_Kinematics.csv")
-    CSV_FILE_2 = os.path.join(BASE_DIR, "recordings", "trial_3_Kinematics_IKA_predicted_lms.csv")
-    #CSV_FILE_2 = os.path.join(BASE_DIR, "recordings", "trial_3_Kinematics_preprocessed.csv")
+    CSV_FILE_1 = os.path.join(BASE_DIR, "recordings", "trial_3_Kinematics.csv") 
+    CSV_FILE_2 = os.path.join(BASE_DIR, "recordings", "trial_3_Kinematics_preprocessed.csv")
+    CSV_FILE_3 = os.path.join(BASE_DIR, "predicted_kinematics_lms.csv")
+
 
     if os.path.exists(CSV_FILE_1):
-        visualize_raw_csv(CSV_FILE_1, csv_path2=CSV_FILE_2, step=2)
+        visualize_raw_csv(CSV_FILE_1, csv_path2=CSV_FILE_2, csv_path3=CSV_FILE_3, step=2)
     else:
         print(f"File non trovato: {CSV_FILE_1}")

@@ -5,3 +5,6 @@ pyqtgraph
 numpy
 scipy
 pylsl
+pandas
+matplotlib
+torch
