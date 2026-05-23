@@ -4,7 +4,7 @@ import torch
 import os
 from scipy.signal import butter, filtfilt, iirnotch
 from scipy.interpolate import interp1d
-from core_kin import process_full_kinematics_core
+from core_kin import process_full_kinematics_core, extract_anatomy_from_csv
 
 class BionicFeatureExtractor:
     def __init__(self, fs_emg=2000):
@@ -86,7 +86,7 @@ class BionicFeatureExtractor:
         # Ora la varianza è centrata. Niente np.clip() prima dell'interpolazione!
         
         # 4. Interpolazione Lineare
-        interpolator = interp1d(time_kin, norm_angles, axis=0, bounds_error=False, fill_value="extrapolate")
+        interpolator = interp1d(time_kin, norm_angles, axis=0, bounds_error=False, fill_value=(norm_angles[0], norm_angles[-1]))
         aligned_angles = interpolator(target_timestamps)
         
         return aligned_angles, q_rest # Restituisci q_rest se ti serve salvarlo
@@ -119,17 +119,53 @@ class BionicFeatureExtractor:
             # Il target è l'angolo all'istante t
             Y_target[i] = aligned_angles[t_idx, :]
             
-        return torch.tensor(X_emg), torch.tensor(X_ang), torch.tensor(Y_target)
+            # --- Z-SCORE STANDARDIZATION ---
+        # Convertiamo prima in tensori PyTorch
+        X_emg_tensor = torch.tensor(X_emg)
+        X_ang_tensor = torch.tensor(X_ang)
+        Y_target_tensor = torch.tensor(Y_target)
+        #Y_target_tensor = torch.clamp(Y_target_tensor, min=0.0, max=1.0) #clamping!
+
+        # Calcola le statistiche e SALVALE
+        emg_mean = X_emg_tensor.mean(dim=0)
+        emg_std = X_emg_tensor.std(dim=0) + 1e-6
+        ang_mean = X_ang_tensor.mean(dim=0)
+        ang_std = X_ang_tensor.std(dim=0) + 1e-6
+
+        # Applica la standardizzazione
+        X_emg_tensor = (X_emg_tensor - emg_mean) / emg_std
+        X_ang_tensor = (X_ang_tensor - ang_mean) / ang_std
+        
+        # Restituiamo anche le statistiche!
+        return X_emg_tensor, X_ang_tensor, Y_target_tensor, emg_mean, emg_std, ang_mean, ang_std
+        
 
 def main():
     # --- 1. DEFINIZIONE PERCORSI FILE ---
     # Ricava il percorso assoluto della cartella corrente dello script (NP_project)
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    EMG_FILE = os.path.join(BASE_DIR, "recordings/trial_3_EMG.csv")       # Usa trial_1 per TRAIN, trial_2 per VAL
-    KIN_FILE = os.path.join(BASE_DIR, "recordings/trial_3_Kinematics.csv") 
-    OUTPUT_FILE = os.path.join(BASE_DIR, "test_tensors.pt") # Cambia in val_tensors.pt quando processi il trial_2
+    EMG_FILE = os.path.join(BASE_DIR, "recordings/trial_1_EMG.csv")       # Usa trial_1 per TRAIN, trial_2 per VAL, trial_3 per test
+    KIN_FILE = os.path.join(BASE_DIR, "recordings/trial_1_Kinematics.csv") 
+    OUTPUT_FILE = os.path.join(BASE_DIR, "train_tensors.pt") # Cambia in test_tensors.pt quando processi il trial_3
     
     KIN_IKA_FILE = KIN_FILE.replace('.csv', '_core_IKA_24DoF.csv')
+    CALIB_FILE = os.path.join(BASE_DIR, "hand_calibration.pt")
+    
+    # Parametri per la calibrazione anatomica (presi da core_kin.py)
+    START_CALIB = 540
+    END_CALIB = 590
+    
+    # --- 1.2 CONTROLLO E CALCOLO CALIBRAZIONE ANATOMICA ---
+    if not os.path.exists(CALIB_FILE):
+        print(f"File di calibrazione anatomica '{CALIB_FILE}' non trovato.")
+        print(f"Avvio calcolo calibrazione automatica da {KIN_FILE} (frame {START_CALIB}-{END_CALIB})...")
+        try:
+            anatomy = extract_anatomy_from_csv(KIN_FILE, START_CALIB, END_CALIB)
+            torch.save(anatomy, CALIB_FILE)
+            print(f"Calibrazione anatomica salvata in: {os.path.basename(CALIB_FILE)}")
+        except Exception as e:
+            print(f"Errore durante la creazione del file di calibrazione: {e}")
+            return
     
     try:
         df_emg = pd.read_csv(EMG_FILE)
@@ -176,7 +212,8 @@ def main():
     # Processa Cinematica e allinea
     aligned_angles, q_rest = extractor.process_kinematics(df_kin, rms_timestamps)    
     # Crea tensori
-    X_e, X_a, Y = extractor.create_tensors(rms_data, aligned_angles)
+    # Crea tensori e recupera le statistiche
+    X_e, X_a, Y, emg_mean, emg_std, ang_mean, ang_std = extractor.create_tensors(rms_data, aligned_angles)
     
     # --- EXTRA: SALVATAGGIO EMG RMS PER INFERENCE ---
     # Esportiamo l'RMS a ~80Hz per darlo in pasto a inference.py
@@ -189,9 +226,10 @@ def main():
     # --- 3. SALVATAGGIO DEI DATI ---
     # Salviamo i tensori in un dizionario PyTorch
     torch.save({
-        'X_emg': X_e,
-        'X_ang': X_a,
-        'Y_target': Y
+        'X_emg': X_e, 'X_ang': X_a, 'Y_target': Y,
+        'emg_mean': emg_mean, 'emg_std': emg_std,
+        'ang_mean': ang_mean, 'ang_std': ang_std,
+        'q_rest': q_rest
     }, OUTPUT_FILE)
     
     print(f"\nOperazione completata con successo!")
