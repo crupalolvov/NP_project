@@ -3,7 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import welch
 
-def diagnose_emg_quality(df_emg, fs=2000, rest_duration=5.0):
+def diagnose_emg_quality(df_emg, fs=2000, rest_duration=8.0):
     """
     Analizza la qualità del segnale EMG (PSD, SNR, Dinamica)
     """
@@ -25,10 +25,14 @@ def diagnose_emg_quality(df_emg, fs=2000, rest_duration=5.0):
     rms_rest[rms_rest == 0] = 1e-6 
     
     snr_db = 20 * np.log10(rms_active_max / rms_rest)
-    mean_snr = np.mean(snr_db)
+    
+    # Filtriamo i canali "morti" (quelli che hanno SNR = -inf)
+    valid_snr = snr_db[np.isfinite(snr_db)]
+    mean_snr = np.mean(valid_snr) if len(valid_snr) > 0 else 0
     
     print(f"1. Rapporto Segnale-Rumore (SNR):")
-    print(f"   SNR Medio tra i canali: {mean_snr:.2f} dB")
+    print(f"   Canali funzionanti: {len(valid_snr)} su {len(snr_db)}")
+    print(f"   SNR Medio (canali validi): {mean_snr:.2f} dB")
     if mean_snr < 10:
         print("   -> ATTENZIONE: SNR molto basso! Il segnale è dominato dal rumore.")
     elif mean_snr > 20:
@@ -53,7 +57,7 @@ def diagnose_emg_quality(df_emg, fs=2000, rest_duration=5.0):
     
     # 3. Visualizzazione Temporale (Confronto 3 Canali Random)
     plt.subplot(2, 1, 2)
-    ch_to_plot = [0, len(emg_channels)//2, len(emg_channels)-1] # Prende 3 canali distanti
+    ch_to_plot = [0, 3, 7, 13, len(emg_channels)//2, len(emg_channels)-1] # Prende 3 canali distanti
     for idx, ch in enumerate(ch_to_plot):
         # Calcolo un RMS rapido per la visualizzazione
         window = int(fs * 0.1) # 100ms
