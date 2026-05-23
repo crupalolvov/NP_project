@@ -191,7 +191,7 @@ if __name__ == "__main__":
     
     FILE_EMG_RMS = os.path.join(BASE_DIR, "recordings", "trial_3_EMG_RMS.csv") 
     FILE_MODELLO = os.path.join(BASE_DIR, "rpc_net_weights.pth")
-    FILE_OUTPUT_ANGLES = os.path.join(BASE_DIR, "predicted_kinematics_offline.csv")
+    FILE_OUTPUT_ANGLES = os.path.join(BASE_DIR, "predicted_kinematics_angles.csv")
     FILE_CALIB = os.path.join(BASE_DIR, "hand_calibration.pt")
     FILE_OUTPUT_LMS = os.path.join(BASE_DIR, "predicted_kinematics_lms.csv")
     

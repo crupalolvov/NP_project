@@ -33,17 +33,18 @@ class BionicFeatureExtractor:
         emg_channels = [col for col in emg_df.columns if 'CH_' in col or 'EMG_' in col]
         raw_data = emg_df[emg_channels].values # Shape: (Samples, 32)
         
-        # A. Common Average Reference (CAR)
-        car_data = raw_data - np.mean(raw_data, axis=1, keepdims=True)
-        
+        # A. Common Average Reference (CAR) - NO! facciamo rimozione DC individuale per canale
+        #car_data = raw_data - np.mean(raw_data, axis=1, keepdims=True)
+        dc_removed_data = raw_data - np.mean(raw_data, axis=0, keepdims=True)
+
         # B. Filtraggio Temporale (Zero-phase filtfilt)
-        filtered = filtfilt(self.b_band, self.a_band, car_data, axis=0)
+        filtered = filtfilt(self.b_band, self.a_band, dc_removed_data, axis=0)
         for b, a in self.notches:
             filtered = filtfilt(b, a, filtered, axis=0)
             
         # C. Rettificazione e Normalizzazione [0, 1]
         rectified = np.abs(filtered) / self.norm_emg
-        np.clip(rectified, 0, 1, out=rectified)
+        #np.clip(rectified, 0, 1, out=rectified)
         
         # D. Estrazione RMS scorrevole
         num_windows = (len(rectified) - self.rms_window) // self.rms_step + 1
@@ -59,23 +60,36 @@ class BionicFeatureExtractor:
         return rms_data, rms_time
 
     def process_kinematics(self, kin_df, target_timestamps):
-        print("Elaborazione Cinematica: Normalizzazione DoF e Sincronizzazione Temporale...")
+        print("Elaborazione Cinematica: Sottrazione Rest Angles e Normalizzazione DoF...")
         time_kin = kin_df['Timestamp_LSL'].values
         dof_cols = [col for col in kin_df.columns if 'DoF_' in col]
         raw_angles = kin_df[dof_cols].values # Shape: (Samples, 24)
         
-        # A. Normalizzazione Angoli: (q + 150) / 240
-        norm_angles = (raw_angles + 150.0) / 240.0
-        np.clip(norm_angles, 0, 1, out=norm_angles)
+        # 1. Calcolo degli angoli di riposo (Rest Angles)
+        # Sfruttiamo il tuo protocollo: 8 secondi iniziali.
+        # Scartiamo il primo secondo (assestamento sensori) e prendiamo i successivi 4 secondi.
+        start_time = time_kin[0]
+        mask_rest = (time_kin >= start_time + 1.0) & (time_kin <= start_time + 5.0)
         
-        # B. Interpolazione Lineare per allineare gli angoli ai timestamp dell'EMG RMS
+        if not np.any(mask_rest):
+            print("ATTENZIONE: Finestra di riposo non trovata, uso i primi 100 sample.")
+            q_rest = np.mean(raw_angles[:100, :], axis=0)
+        else:
+            q_rest = np.mean(raw_angles[mask_rest, :], axis=0)
+            
+        # 2. "Subtraction of rest angles"
+        centered_angles = raw_angles - q_rest
+        
+        # 3. Normalizzazione come da paper RPC-Net
+        norm_angles = (centered_angles + 150.0) / 240.0
+        
+        # Ora la varianza è centrata. Niente np.clip() prima dell'interpolazione!
+        
+        # 4. Interpolazione Lineare
         interpolator = interp1d(time_kin, norm_angles, axis=0, bounds_error=False, fill_value="extrapolate")
         aligned_angles = interpolator(target_timestamps)
         
-        # Previene che l'estrapolazione lineare produca target anomali fuori da [0, 1]
-        np.clip(aligned_angles, 0, 1, out=aligned_angles)
-        
-        return aligned_angles
+        return aligned_angles, q_rest # Restituisci q_rest se ti serve salvarlo
 
     def create_tensors(self, rms_data, aligned_angles):
         print("Creazione dei tensori PyTorch (Generazione loop ricorsivo)...")
@@ -111,9 +125,9 @@ def main():
     # --- 1. DEFINIZIONE PERCORSI FILE ---
     # Ricava il percorso assoluto della cartella corrente dello script (NP_project)
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    EMG_FILE = os.path.join(BASE_DIR, "recordings/trial_1_EMG.csv")       # Usa trial_1 per TRAIN, trial_2 per VAL
-    KIN_FILE = os.path.join(BASE_DIR, "recordings/trial_1_Kinematics.csv") 
-    OUTPUT_FILE = os.path.join(BASE_DIR, "train_tensors.pt") # Cambia in val_tensors.pt quando processi il trial_2
+    EMG_FILE = os.path.join(BASE_DIR, "recordings/trial_3_EMG.csv")       # Usa trial_1 per TRAIN, trial_2 per VAL
+    KIN_FILE = os.path.join(BASE_DIR, "recordings/trial_3_Kinematics.csv") 
+    OUTPUT_FILE = os.path.join(BASE_DIR, "test_tensors.pt") # Cambia in val_tensors.pt quando processi il trial_2
     
     KIN_IKA_FILE = KIN_FILE.replace('.csv', '_core_IKA_24DoF.csv')
     
@@ -160,8 +174,7 @@ def main():
     rms_data, rms_timestamps = extractor.process_emg(df_emg)
     
     # Processa Cinematica e allinea
-    aligned_angles = extractor.process_kinematics(df_kin, rms_timestamps)
-    
+    aligned_angles, q_rest = extractor.process_kinematics(df_kin, rms_timestamps)    
     # Crea tensori
     X_e, X_a, Y = extractor.create_tensors(rms_data, aligned_angles)
     
