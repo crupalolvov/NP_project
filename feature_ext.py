@@ -79,7 +79,10 @@ class BionicFeatureExtractor:
             
         # 2. "Subtraction of rest angles"
         centered_angles = raw_angles - q_rest
-        
+        # --- FIX CINEMATICO: ANGLE WRAPPING ---
+        # Riporta tutti gli angoli nel range [-180, 180] gradi per eliminare i salti di 360°
+        centered_angles = (centered_angles + 180.0) % 360.0 - 180.0
+
         # 3. Normalizzazione come da paper RPC-Net
         norm_angles = (centered_angles + 150.0) / 240.0
         
@@ -144,9 +147,9 @@ def main():
     # --- 1. DEFINIZIONE PERCORSI FILE ---
     # Ricava il percorso assoluto della cartella corrente dello script (NP_project)
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    EMG_FILE = os.path.join(BASE_DIR, "recordings/trial_1_EMG.csv")       # Usa trial_1 per TRAIN, trial_2 per VAL, trial_3 per test
-    KIN_FILE = os.path.join(BASE_DIR, "recordings/trial_1_Kinematics.csv") 
-    OUTPUT_FILE = os.path.join(BASE_DIR, "train_tensors.pt") # Cambia in test_tensors.pt quando processi il trial_3
+    EMG_FILE = os.path.join(BASE_DIR, "recordings/trial_3_EMG.csv")       # Usa trial_1 per TRAIN, trial_2 per VAL, trial_3 per test
+    KIN_FILE = os.path.join(BASE_DIR, "recordings/trial_3_Kinematics.csv") 
+    OUTPUT_FILE = os.path.join(BASE_DIR, "test_tensors.pt") # Cambia in test_tensors.pt quando processi il trial_3
     
     KIN_IKA_FILE = KIN_FILE.replace('.csv', '_core_IKA_24DoF.csv')
     CALIB_FILE = os.path.join(BASE_DIR, "hand_calibration.pt")

@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.widgets import Slider, Button
+from scipy.interpolate import interp1d
 import os
 
 # Connessioni anatomiche della mano secondo MediaPipe
@@ -15,35 +16,70 @@ CONNECTIONS = [
     (5, 9), (9, 13), (13, 17)              # Palmo
 ]
 
-def visualize_raw_csv(csv_path, csv_path2=None, csv_path3=None, step=1):
+def load_and_resample(path, target_time):
+    """Carica un CSV e ricampiona le coordinate 3D su un asse temporale comune."""
+    df = pd.read_csv(path)
+    if 'Timestamp_LSL' in df.columns:
+        t_original = df['Timestamp_LSL'].values
+        t_original = t_original - t_original[0]  # Allineamento forzato a t=0
+    else:
+        t_original = np.arange(len(df)) * (1/80.0)
+        
+    data_resampled = np.zeros((len(target_time), 21, 3))
+    
+    for i in range(21):
+        # Interpoliamo ogni coordinata LM_i_X, Y, Z (usiamo extrapolate per evitare NaN ai bordi)
+        f_x = interp1d(t_original, df[f'LM_{i}_X'].values, kind='linear', bounds_error=False, fill_value="extrapolate")
+        f_y = interp1d(t_original, df[f'LM_{i}_Y'].values, kind='linear', bounds_error=False, fill_value="extrapolate")
+        f_z = interp1d(t_original, df[f'LM_{i}_Z'].values, kind='linear', bounds_error=False, fill_value="extrapolate")
+        
+        data_resampled[:, i, 0] = f_x(target_time)
+        data_resampled[:, i, 1] = f_y(target_time)
+        data_resampled[:, i, 2] = f_z(target_time)
+    return data_resampled
+
+def visualize_raw_csv(csv_path, csv_path2=None, csv_path3=None, target_fps=40.0):
     csv_paths = [csv_path, csv_path2, csv_path3]
-    labels = ["Original", "Processed", "Third"]
+    labels_all = ["Original", "Processed", "Third"]
+    
+    valid_paths = []
+    labels = []
+    for p, l in zip(csv_paths, labels_all):
+        if p and os.path.exists(p):
+            valid_paths.append(p)
+            labels.append(l)
+            
+    if not valid_paths:
+        print("Nessun dato da visualizzare.")
+        return
+
+    def get_time_bounds(path):
+        df = pd.read_csv(path)
+        if 'Timestamp_LSL' in df.columns:
+            t_vals = df['Timestamp_LSL'].values
+            return 0.0, t_vals[-1] - t_vals[0]  # Allineamento forzato a t=0
+        return 0.0, (len(df) - 1) / 80.0
+
+    all_starts, all_ends = zip(*[get_time_bounds(p) for p in valid_paths])
+    t_start, t_end = max(all_starts), min(all_ends)
+    target_time = np.arange(t_start, t_end, 1.0 / target_fps)
+    
+    print(f"Sincronizzazione di {len(valid_paths)} file da {t_start:.2f}s a {t_end:.2f}s...")
     
     frames_data_list = []
     titles = []
-    
-    num_frames = float('inf')
-    for path, label in zip(csv_paths, labels):
-        if path and os.path.exists(path):
-            print(f"Caricamento dati da {os.path.basename(path)}...")
-            df = pd.read_csv(path)
-            df = df.iloc[::step].reset_index(drop=True)
-            num_frames = min(num_frames, len(df))
-            
-            data = np.zeros((len(df), 21, 3))
-            for i in range(21):
-                data[:, i, 0] = df[f'LM_{i}_X'].values
-                data[:, i, 1] = df[f'LM_{i}_Y'].values
-                data[:, i, 2] = df[f'LM_{i}_Z'].values
-            frames_data_list.append(data)
-            titles.append(f"{label}: {os.path.basename(path)}")
-            
-    num_plots = len(frames_data_list)
-    if num_plots == 0:
-        print("Nessun dato da visualizzare.")
+    for p, label in zip(valid_paths, labels):
+        print(f"Caricamento e ricampionamento: {os.path.basename(p)}")
+        frames_data_list.append(load_and_resample(p, target_time))
+        titles.append(f"{label}: {os.path.basename(p)}")
+        
+    num_frames = len(target_time)
+    if num_frames == 0:
+        print("Errore: I file non si sovrappongono o la durata è zero. Controlla i dati!")
         return
         
-    print(f"Fotogrammi da animare: {num_frames}")
+    num_plots = len(frames_data_list)
+    print(f"Fotogrammi da animare: {num_frames} a {target_fps} Hz")
 
     # ================= SETUP FIGURE =================
     fig1 = plt.figure(figsize=(6 * num_plots, 8))
@@ -150,7 +186,7 @@ def visualize_raw_csv(csv_path, csv_path2=None, csv_path3=None, step=1):
             drawn_artists.extend(lines_list[i])
         return drawn_artists
 
-    ani = animation.FuncAnimation(fig1, animate, frames=frame_generator, interval=30, blit=False, cache_frame_data=False)
+    ani = animation.FuncAnimation(fig1, animate, frames=frame_generator, interval=1000/target_fps, blit=False, cache_frame_data=False)
     plt.show()
 
 if __name__ == "__main__":
@@ -161,6 +197,6 @@ if __name__ == "__main__":
 
 
     if os.path.exists(CSV_FILE_1):
-        visualize_raw_csv(CSV_FILE_1, csv_path2=CSV_FILE_2, csv_path3=CSV_FILE_3, step=2)
+        visualize_raw_csv(CSV_FILE_1, csv_path2=CSV_FILE_2, csv_path3=CSV_FILE_3, target_fps=25.0)
     else:
         print(f"File non trovato: {CSV_FILE_1}")

@@ -39,7 +39,8 @@ def update_result(result, output_image, timestamp_ms):
             latest_landmarks = result.hand_landmarks[0] # Usati per disegnare i punti sul video
             world_landmarks = result.hand_world_landmarks[0] # Dati 3D reali in METRI
             
-            lsl_timestamp = local_clock() # Usa l'orologio globale di LSL (stesso dell'EMG!)
+            # RECUPERA IL TIMESTAMP DI CATTURA (Elimina il ritardo di calcolo di MediaPipe)
+            lsl_timestamp = timestamp_ms / 1000.0 
             
             flattened_coords = []
             for lm in world_landmarks:
@@ -95,6 +96,7 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 # Rimossi i comandi CAP_PROP_EXPOSURE e AUTOFOCUS che su Mac causano instabilità o crash intermedi
 
 prev_frame_time = 0
+last_mp_ts = 0
 
 print("Avvio streaming LSL 'MediaPipe_Kinematics'...")
 print("Premi 'R' per registrare. Premi 'Q' per uscire.")
@@ -102,11 +104,13 @@ print("Premi 'R' per registrare. Premi 'Q' per uscire.")
 with HandLandmarker.create_from_options(options) as landmarker:
     while cap.isOpened():
         success, frame = cap.read()
+        frame_lsl_time = local_clock() # Cattura il tempo LSL ESATTAMENTE al momento dello scatto
+        
         if not success: 
             print("Errore: Impossibile ricevere frame dalla webcam.")
             break
 
-        frame = cv2.flip(frame, 1)
+        #frame = cv2.flip(frame, 1)
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
@@ -123,8 +127,12 @@ with HandLandmarker.create_from_options(options) as landmarker:
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
         
-        # Uso di time.perf_counter() per alta precisione temporale coerente su Unix
-        frame_timestamp_ms = int(time.perf_counter() * 1000)
+        # Passiamo a MediaPipe il timestamp di acquisizione Hardware
+        frame_timestamp_ms = int(frame_lsl_time * 1000)
+        # MediaPipe richiede timestamp strettamente crescenti, lo forziamo in caso di frame istantanei
+        if frame_timestamp_ms <= last_mp_ts:
+            frame_timestamp_ms = last_mp_ts + 1
+        last_mp_ts = frame_timestamp_ms
         
         try:
             landmarker.detect_async(mp_image, frame_timestamp_ms)

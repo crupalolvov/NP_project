@@ -7,34 +7,51 @@ from RPC_Net import RPCNet_Exact
 
 def plot_joint_errors(y_true: np.ndarray, y_pred: np.ndarray, dataset_name="", output_dir="eval"):
     """
-    Calcola e plotta l'RMSE per ogni Grado di Libertà.
-    y_true, y_pred: array numpy di forma (n_campioni, 24)
+    Calcola e plotta l'RMSE, il MAE e la Correlazione di Pearson per ogni Grado di Libertà.
+    I valori vengono convertiti da [0, 1] a Gradi Reali.
     """
-    # Calcolo RMSE per ogni colonna (DoF)
+    # Calcolo RMSE e MAE in unità normalizzate [0, 1]
     rmse_per_joint = np.sqrt(np.mean((y_true - y_pred)**2, axis=0))
-    
-    # Calcolo Errore Medio Assoluto (MAE) come metrica secondaria
     mae_per_joint = np.mean(np.abs(y_true - y_pred), axis=0)
 
-    # Configurazione del grafico
+    # Conversione dell'errore in GRADI REALI (Normalizzazione basata su Range di 240°)
+    rmse_deg = rmse_per_joint * 240.0
+    mae_deg = mae_per_joint * 240.0
+    
+    # Calcolo Correlazione di Pearson per ogni joint
+    correlations = []
+    for i in range(24):
+        # Controllo della deviazione standard per evitare divisioni per zero se il target è statico
+        if np.std(y_true[:, i]) > 1e-6 and np.std(y_pred[:, i]) > 1e-6:
+            corr = np.corrcoef(y_true[:, i], y_pred[:, i])[0, 1]
+        else:
+            corr = 0.0
+        correlations.append(corr)
+
+    # Stampe di diagnostica globale
+    print(f"[{dataset_name}] Errore Medio Assoluto (MAE) globale: {np.mean(mae_deg):.2f}°")
+    print(f"[{dataset_name}] Errore Quadratico Medio (RMSE) globale: {np.mean(rmse_deg):.2f}°")
+    print(f"[{dataset_name}] Correlazione media (Pearson): {np.nanmean(correlations):.3f}")
+
+    # Configurazione del grafico a barre
     dof_indices = np.arange(24)
     width = 0.35
 
-    fig, ax = plt.subplots(figsize=(12, 6))
-    bars_rmse = ax.bar(dof_indices - width/2, rmse_per_joint, width, label='RMSE', color='#1f77b4')
-    bars_mae = ax.bar(dof_indices + width/2, mae_per_joint, width, label='MAE', color='#ff7f0e')
+    fig, ax = plt.subplots(figsize=(14, 6))
+    bars_rmse = ax.bar(dof_indices - width/2, rmse_deg, width, label='RMSE (Gradi)', color='#1f77b4')
+    bars_mae = ax.bar(dof_indices + width/2, mae_deg, width, label='MAE (Gradi)', color='#ff7f0e')
 
     ax.set_xlabel('Indice Grado di Libertà (DoF)')
-    ax.set_ylabel('Errore (Unità Normalizzate)')
-    ax.set_title(f'Errore di Predizione per ogni Joint - {dataset_name}')
+    ax.set_ylabel('Errore Assoluto (Gradi)')
+    ax.set_title(f'Errore di Predizione Biomeccanica per ogni Joint - {dataset_name}')
     ax.set_xticks(dof_indices)
     ax.legend()
     ax.grid(axis='y', linestyle='--', alpha=0.7)
 
-    # Aggiunta del valore sopra ogni barra RMSE per chiarezza
+    # Aggiunta del valore in gradi sopra ogni barra RMSE per immediata leggibilità
     for bar in bars_rmse:
         yval = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2, yval + 0.01, f'{yval:.2f}', ha='center', va='bottom', fontsize=8, rotation=90)
+        ax.text(bar.get_x() + bar.get_width()/2, yval + 0.5, f'{yval:.1f}°', ha='center', va='bottom', fontsize=8, rotation=90)
 
     plt.tight_layout()
     os.makedirs(output_dir, exist_ok=True)
@@ -43,25 +60,34 @@ def plot_joint_errors(y_true: np.ndarray, y_pred: np.ndarray, dataset_name="", o
     plt.close()
     print(f"Grafico RMSE salvato in: {save_path}")
 
-def plot_trajectory(y_true: np.ndarray, y_pred: np.ndarray, dof_index: int = 0, dataset_name="", output_dir="eval"):
+def plot_trajectory(y_true: np.ndarray, y_pred: np.ndarray, dof_indices: list, dataset_name="", output_dir="eval"):
     """
-    Plotta l'andamento temporale di un singolo DoF per confrontare visivamente
-    le predizioni della rete rispetto ai valori reali.
+    Plotta l'andamento temporale di multipli DoF in subplots per analizzare 
+    la coerenza del timing e la presenza di crosstalk/sinergie.
     """
-    plt.figure(figsize=(12, 4))
-    plt.plot(y_true[:, dof_index], label='Reale (Ground Truth)', color='green', linewidth=2)
-    plt.plot(y_pred[:, dof_index], label='Predetto (RPC-Net)', color='red', linestyle='dashed', linewidth=2)
-    plt.title(f'Confronto Traiettoria nel Tempo - DoF {dof_index} ({dataset_name})')
-    plt.xlabel('Campioni / Time steps (~80 Hz)')
-    plt.ylabel('Angolo Normalizzato [0, 1]')
-    plt.legend()
-    plt.grid(True, linestyle=':', alpha=0.7)
+    num_plots = len(dof_indices)
+    fig, axes = plt.subplots(num_plots, 1, figsize=(12, 3.5 * num_plots), sharex=True)
+    
+    if num_plots == 1:
+        axes = [axes]
+        
+    for ax, dof_idx in zip(axes, dof_indices):
+        ax.plot(y_true[:, dof_idx], label='Reale (Ground Truth)', color='green', linewidth=2)
+        ax.plot(y_pred[:, dof_idx], label='Predetto (RPC-Net)', color='red', linestyle='dashed', linewidth=2)
+        ax.set_title(f'Traiettoria nel Tempo - DoF {dof_idx}')
+        ax.set_ylabel('Normalizzato [0, 1]')
+        ax.legend()
+        ax.grid(True, linestyle=':', alpha=0.7)
+        
+    axes[-1].set_xlabel('Campioni Temporali (~80 Hz)')
+    fig.suptitle(f'Analisi delle Sinergie Articolari ({dataset_name})', fontsize=14)
     plt.tight_layout()
+    
     os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, f"trajectory_dof{dof_index}_{dataset_name.replace('.pt', '').replace('.csv', '').replace(' ', '_')}.png")
+    save_path = os.path.join(output_dir, f"trajectory_synergy_{dataset_name.replace('.pt', '').replace('.csv', '').replace(' ', '_')}.png")
     plt.savefig(save_path)
     plt.close()
-    print(f"Grafico traiettoria salvato in: {save_path}")
+    print(f"Grafico traiettorie salvato in: {save_path}")
 
 def evaluate_tensors_directly(tensor_file, model_file, output_dir):
     dataset_name = os.path.basename(tensor_file)
@@ -79,7 +105,10 @@ def evaluate_tensors_directly(tensor_file, model_file, output_dir):
             Y_pred = model(X_emg, X_ang)
             
         plot_joint_errors(Y_target.numpy(), Y_pred.numpy(), dataset_name, output_dir)
-        plot_trajectory(Y_target.numpy(), Y_pred.numpy(), dof_index=8, dataset_name=dataset_name, output_dir=output_dir)
+        
+        # Plot multi-articolare per valutare la distinzione delle dita
+        # DoF 0: Polso (o Base) | DoF 8: Indice | DoF 16: Anulare
+        plot_trajectory(Y_target.numpy(), Y_pred.numpy(), dof_indices=[0, 8, 16], dataset_name=dataset_name, output_dir=output_dir)
         
     except FileNotFoundError as e:
         print(f"Errore: {e}. Assicurati che i file esistano.")
@@ -97,22 +126,24 @@ def evaluate_offline_inference(pred_csv_file, target_tensor_file, output_dir):
         test_data = torch.load(target_tensor_file, weights_only=False)
         y_true = test_data['Y_target'].numpy()
         
+        # Rimozione del buffer passivo (0.78s) introdotto dall'inizializzazione nell'inferenza offline
         WINDOW_SIZE = 64
         y_pred = y_pred_full[WINDOW_SIZE:]
         
+        # Allineamento in caso di lievi discrepanze nella lunghezza degli array
         min_len = min(len(y_true), len(y_pred))
         y_true = y_true[:min_len]
         y_pred = y_pred[:min_len]
         
-        print(f"Dati allineati! Campioni validi da confrontare: {min_len}")
+        print(f"Dati allineati temporaneamente. Campioni validi da confrontare: {min_len}")
         
         plot_joint_errors(y_true, y_pred, dataset_name, output_dir)
-        plot_trajectory(y_true, y_pred, dof_index=8, dataset_name=dataset_name, output_dir=output_dir)
+        plot_trajectory(y_true, y_pred, dof_indices=[0, 8, 16], dataset_name=dataset_name, output_dir=output_dir)
         
     except FileNotFoundError as e:
         print(f"Errore: {e}. Assicurati di aver generato '{pred_csv_file}' e '{target_tensor_file}'.")
 
-# --- ESEMPIO DI UTILIZZO ---
+# --- ESECUZIONE PRINCIPALE ---
 if __name__ == "__main__":
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     FILE_MODELLO = os.path.join(BASE_DIR, "rpc_net_weights.pth")
@@ -131,6 +162,8 @@ if __name__ == "__main__":
     # =========================================================================
     # MODALITÀ 2: Valutazione del file CSV prodotto da inference.py
     # =========================================================================
-    # FILE_PRED_CSV = os.path.join(BASE_DIR, "predicted_kinematics_offline.csv")
+    # Decommenta queste righe se desideri valutare il file esportato dall'inferenza
+    # FILE_PRED_CSV = os.path.join(BASE_DIR, "predicted_kinematics_angles.csv")
     # FILE_TARGET_PT = os.path.join(BASE_DIR, "test_tensors.pt")
-    # evaluate_offline_inference(FILE_PRED_CSV, FILE_TARGET_PT, EVAL_DIR)
+    # if os.path.exists(FILE_PRED_CSV) and os.path.exists(FILE_TARGET_PT):
+    #     evaluate_offline_inference(FILE_PRED_CSV, FILE_TARGET_PT, EVAL_DIR)

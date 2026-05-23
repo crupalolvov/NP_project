@@ -65,7 +65,7 @@ def train_model(train_file, val_file, epochs=50, batch_size=10):
                 val_preds = model(val_emg, val_ang)
                 val_loss += criterion(val_preds, val_target).item()
 
-                print(f"   [Debug] Predizioni - Min: {val_preds.min().item():.4f}, Max: {val_preds.max().item():.4f} | Target - Min: {val_target.min().item():.4f}, Max: {val_target.max().item():.4f}")
+                #print(f"   [Debug] Predizioni - Min: {val_preds.min().item():.4f}, Max: {val_preds.max().item():.4f} | Target - Min: {val_target.min().item():.4f}, Max: {val_target.max().item():.4f}")
         
         avg_val_loss = val_loss / len(val_loader)
         
