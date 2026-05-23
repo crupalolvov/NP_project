@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 # Importa l'architettura esatta dal tuo file locale
 from RPC_Net import RPCNet_Exact 
 
-def train_model(train_file, val_file, epochs=10, batch_size=10):
+def train_model(train_file, val_file, epochs=50, batch_size=10):
     # 1. Caricamento dei dati di TRAIN
     print(f"Caricamento dei tensori di TRAIN da {train_file}...")
     train_data = torch.load(train_file, weights_only=False)
@@ -29,7 +29,7 @@ def train_model(train_file, val_file, epochs=10, batch_size=10):
     criterion = nn.MSELoss()
     
     # Iperparametri hard-coded dal protocollo
-    optimizer = optim.Adam(model.parameters(), lr=1e-5, eps=1e-3, betas=(0.9, 0.99))
+    optimizer = optim.Adam(model.parameters(), lr=1e-4, eps=1e-3, betas=(0.9, 0.99))
 
     # 4. Training Loop
     print(f"Avvio addestramento ({epochs} epoche)...")
@@ -64,6 +64,8 @@ def train_model(train_file, val_file, epochs=10, batch_size=10):
             for val_emg, val_ang, val_target in val_loader:
                 val_preds = model(val_emg, val_ang)
                 val_loss += criterion(val_preds, val_target).item()
+
+                print(f"   [Debug] Predizioni - Min: {val_preds.min().item():.4f}, Max: {val_preds.max().item():.4f} | Target - Min: {val_target.min().item():.4f}, Max: {val_target.max().item():.4f}")
         
         avg_val_loss = val_loss / len(val_loader)
         

@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
-from scipy.signal import butter, lfilter
+from scipy.signal import butter, lfilter, lfilter_zi
 import time
 import os
 from core_kin import CleanHandFK
@@ -23,7 +23,8 @@ class SingleJointNet_Exact(nn.Module):
             nn.Linear(512 + 24, 134), nn.ReLU(),
             nn.Linear(134, 134), nn.ReLU(),
             nn.Linear(134, 134), nn.ReLU(),
-            nn.Linear(134, 1)
+            nn.Linear(134, 1),
+            nn.Sigmoid()
         )
 
     def forward(self, emg, ang):
@@ -64,14 +65,27 @@ def run_offline_inference(emg_csv_path, model_path, output_csv_path):
     model.load_state_dict(torch.load(model_path, weights_only=True))
     model.eval()
     
+    # --- NOVITÀ: CARICAMENTO STATISTICHE Z-SCORE ---
+    train_pt_path = os.path.join(os.path.dirname(model_path), "train_tensors.pt")
+    print(f"Caricamento statistiche di normalizzazione da: {train_pt_path}")
+    train_stats = torch.load(train_pt_path, weights_only=False)
+    
+    emg_mean = train_stats['emg_mean'].numpy()
+    emg_std = train_stats['emg_std'].numpy()
+    ang_mean = train_stats['ang_mean'].numpy()
+    ang_std = train_stats['ang_std'].numpy()
+    
     # 3. Inizializzazione Buffer (0.78s di memoria)
     emg_buffer = np.zeros((64, 32), dtype=np.float32)
-    ang_buffer = np.zeros((64, 24), dtype=np.float32)
+    # IMPORTANTE: 0.625 è la posa di riposo (150/240). Non 0.0 (-150 gradi)!
+    ang_buffer = np.full((64, 24), 150.0 / 240.0, dtype=np.float32)
     
     # 4. Inizializzazione Filtro Passa-Basso (1 Hz su campionamento RMS a 80.0 Hz effettivi)
     fs_output = 80.0
     b, a = butter(4, 1.0 / (fs_output / 2.0), btype='low')
-    zi = np.zeros((24, max(len(a), len(b)) - 1))
+    # Inizializziamo il filtro stabilizzato sul valore di riposo per evitare sbalzi
+    zi_base = lfilter_zi(b, a)
+    zi = np.array([zi_base * (150.0 / 240.0) for _ in range(24)])
     
     predicted_kinematics = []
     
@@ -92,17 +106,21 @@ def run_offline_inference(emg_csv_path, model_path, output_csv_path):
         # "The initial 0.78 s of a session may not be used [...] due to the absence of sufficient earlier data."
         if i < WINDOW_SIZE:
             # Riempiamo l'output con zeri per mantenere allineati i timestamp di LSL
-            predicted_kinematics.append(np.zeros(24))
+            predicted_kinematics.append(np.full(24, 150.0 / 240.0))
             continue
         
         # Sottocampionamento per la rete (Feature Extraction Spaziale e Inerziale)
         emg_input = emg_buffer[::4, :].flatten()
         ang_input = ang_buffer[::8, :].flatten()
         
+        # --- APPLICAZIONE DELLO Z-SCORE CON LE STATISTICHE DI TRAINING ---
+        emg_input_norm = (emg_input - emg_mean) / emg_std
+        ang_input_norm = (ang_input - ang_mean) / ang_std
+        
         # Inferenza
         with torch.no_grad():
-            emg_tensor = torch.tensor(emg_input, dtype=torch.float32).unsqueeze(0)
-            ang_tensor = torch.tensor(ang_input, dtype=torch.float32).unsqueeze(0)
+            emg_tensor = torch.tensor(emg_input_norm, dtype=torch.float32).unsqueeze(0)
+            ang_tensor = torch.tensor(ang_input_norm, dtype=torch.float32).unsqueeze(0)
             pred_angles = model(emg_tensor, ang_tensor).numpy()[0]
             
         # Filtraggio
@@ -139,7 +157,7 @@ def run_offline_inference(emg_csv_path, model_path, output_csv_path):
     print(f"Predizioni salvate con successo in: {output_csv_path}")
 
 # --- 3. DECODIFICA IN COORDINATE 3D (FORWARD KINEMATICS) ---
-def decode_predictions_to_csv(pred_csv_path, calibration_file, output_lms_path):
+def decode_predictions_to_csv(pred_csv_path, calibration_file, output_lms_path, stats_file):
     print(f"\n--- AVVIO DECODIFICA FK (Angoli -> Coordinate 3D) ---")
     df_pred = pd.read_csv(pred_csv_path)
     
@@ -151,6 +169,11 @@ def decode_predictions_to_csv(pred_csv_path, calibration_file, output_lms_path):
     anatomy = torch.load(calibration_file, weights_only=False)
     fk = CleanHandFK(anatomy)
     
+    # --- RECUPERO ANGOLI DI RIPOSO ---
+    print(f"Caricamento angoli di riposo (q_rest) da: {stats_file}")
+    train_stats = torch.load(stats_file, weights_only=False)
+    q_rest = train_stats['q_rest'] # Array (24,) con la postura in gradi
+
     num_frames = len(df_pred)
     lms_data = []
     pred_cols = [f'Pred_DoF_{i}' for i in range(24)]
@@ -165,9 +188,14 @@ def decode_predictions_to_csv(pred_csv_path, calibration_file, output_lms_path):
         row = df_pred.iloc[i]
         q_norm = row[pred_cols].values
         
-        # 1. Denormalizzazione: [0, 1] -> Gradi Reali -> Radianti
-        q_deg = (q_norm * 240.0) - 150.0
-        q_rad = np.radians(q_deg)
+        # 1. Denormalizzazione: [0, 1] -> Gradi Centrati
+        q_deg_centered = (q_norm * 240.0) - 150.0
+        
+        # 2. Riassegnazione della Postura Assoluta (IL PEZZO MANCANTE)
+        q_deg_absolute = q_deg_centered + q_rest
+        
+        # 3. Conversione in radianti per la FK
+        q_rad = np.radians(q_deg_absolute)
         
         # 2. Cinematica Diretta
         lms_3d = fk.forward(q_rad)
@@ -194,9 +222,10 @@ if __name__ == "__main__":
     FILE_OUTPUT_ANGLES = os.path.join(BASE_DIR, "predicted_kinematics_angles.csv")
     FILE_CALIB = os.path.join(BASE_DIR, "hand_calibration.pt")
     FILE_OUTPUT_LMS = os.path.join(BASE_DIR, "predicted_kinematics_lms.csv")
+    FILE_STATS = os.path.join(BASE_DIR, "train_tensors.pt")
     
     # 1. Inferenza (EMG -> Angoli)
     run_offline_inference(FILE_EMG_RMS, FILE_MODELLO, FILE_OUTPUT_ANGLES)
     
     # 2. Decodifica (Angoli -> Coordinate 3D MediaPipe)
-    decode_predictions_to_csv(FILE_OUTPUT_ANGLES, FILE_CALIB, FILE_OUTPUT_LMS)
+    decode_predictions_to_csv(FILE_OUTPUT_ANGLES, FILE_CALIB, FILE_OUTPUT_LMS, FILE_STATS)

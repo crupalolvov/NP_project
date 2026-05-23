@@ -31,7 +31,8 @@ class SingleJointNet_Exact(nn.Module):
             nn.ReLU(),
             nn.Linear(134, 134),
             nn.ReLU(),
-            nn.Linear(134, 1)  # FC finale senza ReLU
+            nn.Linear(134, 1),  # FC finale senza ReLU
+            nn.Sigmoid()
         )
 
     def forward(self, emg, ang):
@@ -57,7 +58,7 @@ criterion = nn.MSELoss() #
 # Iperparametri hard-coded presi dal paper
 optimizer = optim.Adam(
     model.parameters(), 
-    lr=1e-5, 
+    lr=1e-4, 
     eps=1e-3, 
     betas=(0.9, 0.99)
 )
