@@ -7,7 +7,6 @@ import time
 import os
 from core_kin import CleanHandFK
 
-
 from RPC_Net import RPCNet_Exact
 
 class SingleJointNet_Exact(nn.Module):
@@ -42,22 +41,16 @@ class RPCNet_Exact(nn.Module):
         outputs = [net(emg, ang) for net in self.sub_nets]
         return torch.cat(outputs, dim=1)
 
-
 # --- 2. DECODER OFFLINE ---
-def run_offline_inference(emg_csv_path, model_path, output_csv_path):
-    print(f"Avvio decodifica offline sul file: {emg_csv_path}")
+def run_offline_inference(emg_csv_path, model_path, output_csv_path, stats_file):
+    print(f"Avvio decodifica offline sul file: {os.path.basename(emg_csv_path)}")
     
     # 1. Caricamento Dati EMG
     df_emg = pd.read_csv(emg_csv_path)
-    
-    # Estrazione dei Timestamp (se presenti) per sincronizzare l'output
     timestamps = df_emg['Timestamp_LSL'].values if 'Timestamp_LSL' in df_emg.columns else np.arange(len(df_emg))
     
-    # Estrazione dei 32 canali (assumendo che le colonne si chiamino CH_0, CH_1, ... CH_31)
-    # Adatta questo filtro in base all'intestazione reale del tuo CSV
     emg_columns = [col for col in df_emg.columns if 'CH_' in col or 'EMG_' in col]
     emg_data = df_emg[emg_columns].values
-    
     num_samples = len(emg_data)
     
     # 2. Inizializzazione Modello PyTorch
@@ -65,71 +58,67 @@ def run_offline_inference(emg_csv_path, model_path, output_csv_path):
     model.load_state_dict(torch.load(model_path, weights_only=True))
     model.eval()
     
-    # --- NOVITÀ: CARICAMENTO STATISTICHE Z-SCORE ---
-    train_pt_path = os.path.join(os.path.dirname(model_path), "train_tensors.pt")
-    print(f"Caricamento statistiche di normalizzazione da: {train_pt_path}")
-    train_stats = torch.load(train_pt_path, weights_only=False)
-    
-    emg_mean = train_stats['emg_mean'].numpy()
-    emg_std = train_stats['emg_std'].numpy()
+    # 3. Caricamento statistiche globali (solo per angoli)
+    print(f"Caricamento statistiche cinematiche globali da: {os.path.basename(stats_file)}")
+    train_stats = torch.load(stats_file, weights_only=False)
     ang_mean = train_stats['ang_mean'].numpy()
     ang_std = train_stats['ang_std'].numpy()
     
-    # 3. Inizializzazione Buffer (0.78s di memoria)
+    # --- CALIBRAZIONE LOCALE EMG (Domain Adaptation) ---
+    # Invece di usare l'EMG globale, calcoliamo le statistiche su questo specifico trial.
+    # Questo annulla i cambiamenti di impedenza elettrodo-pelle!
+    emg_mean_32 = np.mean(emg_data, axis=0)
+    emg_std_32 = np.std(emg_data, axis=0) + 1e-6
+    
+    # La rete si aspetta 512 valori (16 time steps x 32 canali). 
+    # Usiamo np.tile per ripetere le medie dei 32 canali per 16 volte.
+    emg_mean_local = np.tile(emg_mean_32, 16)
+    emg_std_local = np.tile(emg_std_32, 16)
+    print("Calibrazione EMG locale (per-trial) applicata con successo.")
+    
+    # 4. Inizializzazione Buffer (0.78s di memoria)
     emg_buffer = np.zeros((64, 32), dtype=np.float32)
-    # IMPORTANTE: 0.625 è la posa di riposo (150/240). Non 0.0 (-150 gradi)!
+    # Posa di riposo normalizzata: 150/240 = 0.625
     ang_buffer = np.full((64, 24), 150.0 / 240.0, dtype=np.float32)
     
-    # 4. Inizializzazione Filtro Passa-Basso (1 Hz su campionamento RMS a 80.0 Hz effettivi)
+    # 5. Inizializzazione Filtro Passa-Basso
     fs_output = 80.0
     b, a = butter(4, 1.0 / (fs_output / 2.0), btype='low')
-    # Inizializziamo il filtro stabilizzato sul valore di riposo per evitare sbalzi
     zi_base = lfilter_zi(b, a)
     zi = np.array([zi_base * (150.0 / 240.0) for _ in range(24)])
     
     predicted_kinematics = []
-    
     start_time = time.time()
-    
-    # Dimensione della finestra in sample (0.78s * 81.92Hz = ~64 sample)
     WINDOW_SIZE = 64
     
-    # 5. Loop di Simulazione Temporale
+    # 6. Loop di Simulazione Temporale
     for i in range(num_samples):
-        # Acquisizione del dato "corrente" dal dataset
         current_emg_rms = emg_data[i, :]
-        
-        # Aggiornamento buffer EMG
         emg_buffer = np.roll(emg_buffer, shift=-1, axis=0)
         emg_buffer[-1, :] = current_emg_rms
         
-        # "The initial 0.78 s of a session may not be used [...] due to the absence of sufficient earlier data."
         if i < WINDOW_SIZE:
-            # Riempiamo l'output con zeri per mantenere allineati i timestamp di LSL
             predicted_kinematics.append(np.full(24, 150.0 / 240.0))
             continue
         
-        # Sottocampionamento per la rete (Feature Extraction Spaziale e Inerziale)
         emg_input = emg_buffer[::4, :].flatten()
         ang_input = ang_buffer[::8, :].flatten()
         
-        # --- APPLICAZIONE DELLO Z-SCORE CON LE STATISTICHE DI TRAINING ---
-        emg_input_norm = (emg_input - emg_mean) / emg_std
+        # --- Z-SCORE Ibrido ---
+        # EMG usa la statistica locale, Angoli usano la statistica globale
+        emg_input_norm = (emg_input - emg_mean_local) / emg_std_local
         ang_input_norm = (ang_input - ang_mean) / ang_std
         
-        # Inferenza
         with torch.no_grad():
             emg_tensor = torch.tensor(emg_input_norm, dtype=torch.float32).unsqueeze(0)
             ang_tensor = torch.tensor(ang_input_norm, dtype=torch.float32).unsqueeze(0)
             pred_angles = model(emg_tensor, ang_tensor).numpy()[0]
             
-        # Filtraggio
         smoothed_angles = np.zeros(24)
         for j in range(24):
             filtered_val, zi[j] = lfilter(b, a, [pred_angles[j]], zi=zi[j])
             smoothed_angles[j] = filtered_val[0]
             
-        # Aggiornamento buffer Angoli (Loop Ricorsivo)
         ang_buffer = np.roll(ang_buffer, shift=-1, axis=0)
         ang_buffer[-1, :] = smoothed_angles
         
@@ -140,23 +129,18 @@ def run_offline_inference(emg_csv_path, model_path, output_csv_path):
 
     print(f"Inferenza completata in {time.time() - start_time:.2f} secondi.")
 
-    # 6. Salvataggio dei Risultati
     output_data = []
     for i in range(num_samples):
         row_dict = {'Timestamp_LSL': timestamps[i]}
         for j in range(24):
-            # Denormalizzazione opzionale: se la rete predice nel range [0, 1], 
-            # decommenta questa riga per riportare gli angoli in gradi reali
-            # val_gradi = (predicted_kinematics[i][j] * 240.0) - 150.0
-            
             row_dict[f'Pred_DoF_{j}'] = predicted_kinematics[i][j]
         output_data.append(row_dict)
         
     df_out = pd.DataFrame(output_data)
     df_out.to_csv(output_csv_path, index=False)
-    print(f"Predizioni salvate con successo in: {output_csv_path}")
+    print(f"Predizioni salvate in: {output_csv_path}")
 
-# --- 3. DECODIFICA IN COORDINATE 3D (FORWARD KINEMATICS) ---
+# --- 3. DECODIFICA IN COORDINATE 3D ---
 def decode_predictions_to_csv(pred_csv_path, calibration_file, output_lms_path, stats_file):
     print(f"\n--- AVVIO DECODIFICA FK (Angoli -> Coordinate 3D) ---")
     df_pred = pd.read_csv(pred_csv_path)
@@ -165,67 +149,67 @@ def decode_predictions_to_csv(pred_csv_path, calibration_file, output_lms_path, 
         print(f"Errore: File di calibrazione '{calibration_file}' non trovato.")
         return
         
-    print(f"Caricamento calibrazione da: {calibration_file}")
     anatomy = torch.load(calibration_file, weights_only=False)
     fk = CleanHandFK(anatomy)
     
-    # --- RECUPERO ANGOLI DI RIPOSO ---
-    print(f"Caricamento angoli di riposo (q_rest) da: {stats_file}")
     train_stats = torch.load(stats_file, weights_only=False)
-    q_rest = train_stats['q_rest'] # Array (24,) con la postura in gradi
+    q_rest = train_stats['q_rest'] 
 
     num_frames = len(df_pred)
     lms_data = []
     pred_cols = [f'Pred_DoF_{i}' for i in range(24)]
     
-    IMG_WIDTH = 640
-    IMG_HEIGHT = 480
-    
-    # Fissiamo il polso al centro dello schermo virtuale (per visualizzazione)
-    virtual_wrist_pos = np.array([IMG_WIDTH * 0.5, IMG_HEIGHT * 0.5, 0.0])
+    # LA TUA LOGICA: fk.forward restituisce millimetri, il CSV originale è in metri.
+    SCALE_MM_TO_METERS = 1000.0 
     
     for i in range(num_frames):
         row = df_pred.iloc[i]
         q_norm = row[pred_cols].values
         
-        # 1. Denormalizzazione: [0, 1] -> Gradi Centrati
         q_deg_centered = (q_norm * 240.0) - 150.0
-        
-        # 2. Riassegnazione della Postura Assoluta (IL PEZZO MANCANTE)
         q_deg_absolute = q_deg_centered + q_rest
-        
-        # 3. Conversione in radianti per la FK
         q_rad = np.radians(q_deg_absolute)
         
-        # 2. Cinematica Diretta
-        lms_3d = fk.forward(q_rad)
-        lms_3d_abs = lms_3d + virtual_wrist_pos
+        # 1. Output in millimetri
+        lms_3d_mm = fk.forward(q_rad)
+        
+        # 2. Riconversione in METRI (come i World Landmarks)
+        lms_3d_meters = lms_3d_mm / SCALE_MM_TO_METERS
         
         row_out = {'Timestamp_LSL': row['Timestamp_LSL']}
         for lm_idx in range(21):
-            row_out[f'LM_{lm_idx}_X'] = lms_3d_abs[lm_idx, 0] / IMG_WIDTH
-            row_out[f'LM_{lm_idx}_Y'] = lms_3d_abs[lm_idx, 1] / IMG_HEIGHT
-            row_out[f'LM_{lm_idx}_Z'] = lms_3d_abs[lm_idx, 2] / IMG_WIDTH
+            # Nessun offset: il polso resta (0,0,0)
+            row_out[f'LM_{lm_idx}_X'] = lms_3d_meters[lm_idx, 0]
+            row_out[f'LM_{lm_idx}_Y'] = lms_3d_meters[lm_idx, 1]
+            row_out[f'LM_{lm_idx}_Z'] = lms_3d_meters[lm_idx, 2]
             
         lms_data.append(row_out)
             
-    df_lms = pd.DataFrame(lms_data)
-    df_lms.to_csv(output_lms_path, index=False)
-    print(f"Coordinate decodificate salvate con successo in: {output_lms_path}\n")
+    pd.DataFrame(lms_data).to_csv(output_lms_path, index=False)
+    print(f"Coordinate decodificate salvate in: {output_lms_path}\n")
 
 # --- ESECUZIONE ---
 if __name__ == "__main__":
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     
-    FILE_EMG_RMS = os.path.join(BASE_DIR, "recordings", "trial_3_EMG_RMS.csv") 
+    # ---------------------------------------------------------
+    # MODIFICA QUI IL NUMERO DEL TRIAL CHE VUOI TESTARE
+    # Es. 6, 9, 15 (i tuoi trial di Test non visti dalla rete)
+    TRIAL_TEST = 9
+    # ---------------------------------------------------------
+    
+    FILE_EMG_RMS = os.path.join(BASE_DIR, "recordings", f"trial_{TRIAL_TEST}_EMG_RMS.csv") 
     FILE_MODELLO = os.path.join(BASE_DIR, "rpc_net_weights.pth")
     FILE_OUTPUT_ANGLES = os.path.join(BASE_DIR, "predicted_kinematics_angles.csv")
     FILE_CALIB = os.path.join(BASE_DIR, "hand_calibration.pt")
     FILE_OUTPUT_LMS = os.path.join(BASE_DIR, "predicted_kinematics_lms.csv")
     FILE_STATS = os.path.join(BASE_DIR, "train_tensors.pt")
     
-    # 1. Inferenza (EMG -> Angoli)
-    run_offline_inference(FILE_EMG_RMS, FILE_MODELLO, FILE_OUTPUT_ANGLES)
-    
-    # 2. Decodifica (Angoli -> Coordinate 3D MediaPipe)
-    decode_predictions_to_csv(FILE_OUTPUT_ANGLES, FILE_CALIB, FILE_OUTPUT_LMS, FILE_STATS)
+    if os.path.exists(FILE_EMG_RMS):
+        # 1. Inferenza (EMG -> Angoli)
+        run_offline_inference(FILE_EMG_RMS, FILE_MODELLO, FILE_OUTPUT_ANGLES, FILE_STATS)
+        
+        # 2. Decodifica (Angoli -> Coordinate 3D MediaPipe)
+        decode_predictions_to_csv(FILE_OUTPUT_ANGLES, FILE_CALIB, FILE_OUTPUT_LMS, FILE_STATS)
+    else:
+        print(f"Errore: File {FILE_EMG_RMS} non trovato. Assicurati di aver generato i file RMS!")

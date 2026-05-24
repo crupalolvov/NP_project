@@ -6,6 +6,17 @@ from scipy.signal import savgol_filter
 import torch
 import matplotlib.pyplot as plt
 
+def detect_coordinate_format(df):
+    """
+    Rileva automaticamente se il dataframe contiene world_landmarks (metri) o normalizzati (pixel).
+    I world_landmarks hanno il polso all'origine (0,0,0) e assumono valori negativi.
+    """
+    min_x = df[[f'LM_{i}_X' for i in range(21)]].min().min()
+    min_y = df[[f'LM_{i}_Y' for i in range(21)]].min().min()
+    if min_x < -0.01 or min_y < -0.01 or df['LM_0_X'].abs().max() < 1e-4:
+        return True # Metrico
+    return False # Normalizzato
+
 # --- Helper function for Rodrigues' rotation ---
 def rotate_vector_by_rodrigues(v, k, theta):
     """
@@ -41,14 +52,14 @@ def preprocess_mediapipe_data(csv_path, anatomy, window_length=15, polyorder=3):
 
     max_flexion_bounds = {
         'Thumb_IP': 1.54,    
-        'Index_PIP': 2.03,   
-        'Index_DIP': 1.59,   
-        'Middle_PIP': 2.05,  
-        'Middle_DIP': 1.76,  
-        'Ring_PIP': 2.07,    
-        'Ring_DIP': 1.46,    
-        'Pinky_PIP': 1.98,   
-        'Pinky_DIP': 1.44,   
+        'Index_PIP': 2.23,   
+        'Index_DIP': 1.79,   
+        'Middle_PIP': 2.25,  
+        'Middle_DIP': 1.96,  
+        'Ring_PIP': 2.27,    
+        'Ring_DIP': 1.66,    
+        'Pinky_PIP': 2.18,   
+        'Pinky_DIP': 1.64,   
     }
 
     print("--- AVVIO PRE-PROCESSING CINEMATICO (PLANARE RIGOROSO CON HARD-CLAMP) ---")
@@ -57,15 +68,22 @@ def preprocess_mediapipe_data(csv_path, anatomy, window_length=15, polyorder=3):
     
     IMG_WIDTH = 640
     IMG_HEIGHT = 480
+    is_metric = detect_coordinate_format(df)
+    if is_metric:
+        SCALE_X = SCALE_Y = SCALE_Z = 1000.0 # Convertiamo i metri in millimetri
+        print("--- RILEVATI DATI IN METRI (World Landmarks) -> Scalo uniformemente in millimetri ---")
+    else:
+        SCALE_X, SCALE_Y, SCALE_Z = 640.0, 480.0, 640.0
+        print("--- RILEVATI DATI IN PIXEL (Normalizzati) -> Scalo a 640x480 ---")
     
     raw_lms = np.zeros((num_frames, 21, 3))
     for f in range(num_frames):
         row = df.iloc[f]
         for i in range(21):
             raw_lms[f, i] = [
-                row[f'LM_{i}_X'] * IMG_WIDTH, 
-                row[f'LM_{i}_Y'] * IMG_HEIGHT, 
-                row[f'LM_{i}_Z'] * IMG_WIDTH
+                row[f'LM_{i}_X'] * SCALE_X, 
+                row[f'LM_{i}_Y'] * SCALE_Y, 
+                row[f'LM_{i}_Z'] * SCALE_Z
             ]
             
     print(f"1. Filtraggio temporale (Savitzky-Golay)...")
@@ -219,9 +237,9 @@ def preprocess_mediapipe_data(csv_path, anatomy, window_length=15, polyorder=3):
         if 'Timestamp_LSL' in df.columns:
             row_dict['Timestamp_LSL'] = df.iloc[f]['Timestamp_LSL']
         for i in range(21):
-            row_dict[f'LM_{i}_X'] = fixed_lms[f, i, 0] / IMG_WIDTH
-            row_dict[f'LM_{i}_Y'] = fixed_lms[f, i, 1] / IMG_HEIGHT
-            row_dict[f'LM_{i}_Z'] = fixed_lms[f, i, 2] / IMG_WIDTH
+            row_dict[f'LM_{i}_X'] = fixed_lms[f, i, 0] / SCALE_X
+            row_dict[f'LM_{i}_Y'] = fixed_lms[f, i, 1] / SCALE_Y
+            row_dict[f'LM_{i}_Z'] = fixed_lms[f, i, 2] / SCALE_Z
         preprocessed_data.append(row_dict)
         
     df_preprocessed = pd.DataFrame(preprocessed_data)
@@ -261,14 +279,19 @@ def extract_anatomy_from_csv(csv_path, start_frame, end_frame):
     # Dimensioni dell'immagine usata per la cattura per convertire in pixel
     IMG_WIDTH = 640
     IMG_HEIGHT = 480
+    is_metric = detect_coordinate_format(df)
+    if is_metric:
+        SCALE_X = SCALE_Y = SCALE_Z = 1000.0
+    else:
+        SCALE_X, SCALE_Y, SCALE_Z = 640.0, 480.0, 640.0
 
     for i in range(num_frames):
         row = df.iloc[i]
         for lm in range(21):
             lms_history[i, lm] = [
-                row[f'LM_{lm}_X'] * IMG_WIDTH, 
-                row[f'LM_{lm}_Y'] * IMG_HEIGHT, 
-                row[f'LM_{lm}_Z'] * IMG_WIDTH
+                row[f'LM_{lm}_X'] * SCALE_X, 
+                row[f'LM_{lm}_Y'] * SCALE_Y, 
+                row[f'LM_{lm}_Z'] * SCALE_Z
             ]
             
     lms_mean = np.mean(lms_history, axis=0)
@@ -617,10 +640,10 @@ class JacobianIKA:
 # ==========================================
 if __name__ == "__main__":
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    KIN_FILE = os.path.join(BASE_DIR, "recordings", "trial_3_Kinematics.csv") 
+    KIN_FILE = os.path.join(BASE_DIR, "recordings", "trial_1_Kinematics.csv") 
     
-    START_CALIB = 540
-    END_CALIB = 590
+    START_CALIB = 1530
+    END_CALIB = 1700
     
     CALIB_FILE = os.path.join(BASE_DIR, "hand_calibration.pt")
     
@@ -653,6 +676,12 @@ if __name__ == "__main__":
     IMG_WIDTH = 640
     IMG_HEIGHT = 480
     
+    is_metric = detect_coordinate_format(df_orig)
+    if is_metric:
+        SCALE_X = SCALE_Y = SCALE_Z = 1000.0
+    else:
+        SCALE_X, SCALE_Y, SCALE_Z = 640.0, 480.0, 640.0
+    
     # Inseguiamo la mano frame per frame processandoli tutti
     for f in range(num_frames):
         # PRENDIAMO I DATI DAL VETTORE PULITO E PROIETTATO!
@@ -679,9 +708,9 @@ if __name__ == "__main__":
         if 'Timestamp_LSL' in df_orig.columns:
             row_dict['Timestamp_LSL'] = df_orig.iloc[f]['Timestamp_LSL']
         for i in range(21):
-            row_dict[f'LM_{i}_X'] = pred_lms_abs[i, 0] / IMG_WIDTH
-            row_dict[f'LM_{i}_Y'] = pred_lms_abs[i, 1] / IMG_HEIGHT
-            row_dict[f'LM_{i}_Z'] = pred_lms_abs[i, 2] / IMG_WIDTH
+            row_dict[f'LM_{i}_X'] = pred_lms_abs[i, 0] / SCALE_X
+            row_dict[f'LM_{i}_Y'] = pred_lms_abs[i, 1] / SCALE_Y
+            row_dict[f'LM_{i}_Z'] = pred_lms_abs[i, 2] / SCALE_Z
         ika_pred_data.append(row_dict)
         
         mean_errors[f] = np.mean(error_px)
