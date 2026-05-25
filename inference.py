@@ -194,15 +194,15 @@ if __name__ == "__main__":
     
     # ---------------------------------------------------------
     # MODIFICA QUI IL NUMERO DEL TRIAL CHE VUOI TESTARE
-    # Es. 6, 9, 15 (i tuoi trial di Test non visti dalla rete)
-    TRIAL_TEST = 9
+    # Es. 6, 9, 15 (trial di Test non visti dalla rete)
+    TRIAL_TEST = 6
     # ---------------------------------------------------------
     
     FILE_EMG_RMS = os.path.join(BASE_DIR, "recordings", f"trial_{TRIAL_TEST}_EMG_RMS.csv") 
     FILE_MODELLO = os.path.join(BASE_DIR, "rpc_net_weights.pth")
-    FILE_OUTPUT_ANGLES = os.path.join(BASE_DIR, "predicted_kinematics_angles.csv")
+    FILE_OUTPUT_ANGLES = os.path.join(BASE_DIR, f"trial_{TRIAL_TEST}_predicted_kinematics_angles.csv")
     FILE_CALIB = os.path.join(BASE_DIR, "hand_calibration.pt")
-    FILE_OUTPUT_LMS = os.path.join(BASE_DIR, "predicted_kinematics_lms.csv")
+    FILE_OUTPUT_LMS = os.path.join(BASE_DIR, f"trial_{TRIAL_TEST}_predicted_kinematics_lms.csv")
     FILE_STATS = os.path.join(BASE_DIR, "train_tensors.pt")
     
     if os.path.exists(FILE_EMG_RMS):

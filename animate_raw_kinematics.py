@@ -240,7 +240,7 @@ if __name__ == "__main__":
     
     CSV_FILE_1 = os.path.join(BASE_DIR, "recordings", f"trial_{TRIAL}_Kinematics.csv") 
     CSV_FILE_2 = os.path.join(BASE_DIR, "recordings", f"trial_{TRIAL}_Kinematics_preprocessed.csv")
-    CSV_FILE_3 = os.path.join(BASE_DIR, "predicted_kinematics_lms.csv")
+    CSV_FILE_3 = os.path.join(BASE_DIR, f"trial_{TRIAL}_predicted_kinematics_lms.csv")
 
     if os.path.exists(CSV_FILE_1):
         visualize_synced_csv([CSV_FILE_1, CSV_FILE_2, CSV_FILE_3], target_fps=25.0)

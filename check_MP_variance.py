@@ -3,6 +3,16 @@ import pandas as pd
 import os
 import matplotlib.pyplot as plt
 
+def detect_coordinate_format(df):
+    """
+    Rileva automaticamente se il dataframe contiene world_landmarks (metri) o normalizzati (pixel).
+    """
+    min_x = df[[f'LM_{i}_X' for i in range(21)]].min().min()
+    min_y = df[[f'LM_{i}_Y' for i in range(21)]].min().min()
+    if min_x < -0.01 or min_y < -0.01 or df['LM_0_X'].abs().max() < 1e-4:
+        return True 
+    return False 
+
 def analyze_bone_length_variance(csv_path, bone_to_plot=None):
     print(f"--- ANALISI VARIANZA LUNGHEZZE OSSEE (MediaPipe) ---")
     print(f"File in analisi: {os.path.basename(csv_path)}\n")
@@ -10,9 +20,13 @@ def analyze_bone_length_variance(csv_path, bone_to_plot=None):
     df = pd.read_csv(csv_path)
     num_frames = len(df)
     
-    # Dimensioni dell'immagine usata per la cattura, per la conversione in pixel
-    IMG_WIDTH = 640
-    IMG_HEIGHT = 480
+    is_metric = detect_coordinate_format(df)
+    if is_metric:
+        SCALE_X = SCALE_Y = SCALE_Z = 1000.0 # Convertiamo i metri in millimetri
+        print("--- RILEVATI DATI IN METRI (World Landmarks) -> Scalo uniformemente in millimetri ---")
+    else:
+        SCALE_X, SCALE_Y, SCALE_Z = 640.0, 480.0, 640.0
+        print("--- RILEVATI DATI IN PIXEL (Normalizzati) -> Scalo a 640x480 ---")
 
     # Definizione della topologia ossea (i link tra i landmark)
     bone_links = {
@@ -46,24 +60,24 @@ def analyze_bone_length_variance(csv_path, bone_to_plot=None):
     # Inizializziamo un dizionario per raccogliere le lunghezze frame per frame
     bone_lengths_history = {bone: np.zeros(num_frames) for bone in bone_links.keys()}
     
-    print("Calcolo delle lunghezze ossee frame per frame (in PIXEL)...")
+    print("Calcolo delle lunghezze ossee frame per frame...")
     for index, row in df.iterrows():
         for bone_name, (idx1, idx2) in bone_links.items():
-            # Estrai coordinate normalizzate
+            # Estrai coordinate originali
             p1_norm = np.array([row[f'LM_{idx1}_X'], row[f'LM_{idx1}_Y'], row[f'LM_{idx1}_Z']])
             p2_norm = np.array([row[f'LM_{idx2}_X'], row[f'LM_{idx2}_Y'], row[f'LM_{idx2}_Z']])
 
-            # Converti in coordinate pixel. Per Z, usiamo la larghezza come fattore di scala
-            # per mantenere le proporzioni, come suggerito da MediaPipe.
-            p1_pixel = np.array([p1_norm[0] * IMG_WIDTH, p1_norm[1] * IMG_HEIGHT, p1_norm[2] * IMG_WIDTH])
-            p2_pixel = np.array([p2_norm[0] * IMG_WIDTH, p2_norm[1] * IMG_HEIGHT, p2_norm[2] * IMG_WIDTH])
+            # Applica i fattori di scala. Per Z, usiamo la larghezza come fattore di scala nei dati normalizzati
+            # per mantenere le proporzioni reali, come suggerito da MediaPipe.
+            p1_scaled = np.array([p1_norm[0] * SCALE_X, p1_norm[1] * SCALE_Y, p1_norm[2] * SCALE_Z])
+            p2_scaled = np.array([p2_norm[0] * SCALE_X, p2_norm[1] * SCALE_Y, p2_norm[2] * SCALE_Z])
 
-            # Calcolo distanza euclidea in pixel
-            length_px = np.linalg.norm(p2_pixel - p1_pixel)
+            # Calcolo distanza euclidea
+            length_px = np.linalg.norm(p2_scaled - p1_scaled)
             bone_lengths_history[bone_name][index] = length_px
 
     # Stampa dei risultati statistici
-    print(f"\n{'Segmento Osseo':<20} | {'Media (px)':<10} | {'Std Dev (px)':<12} | {'Min (px) [Frame]':<18} | {'Max (px) [Frame]':<18} | {'Max Variazione %':<15}")
+    print(f"\n{'Segmento Osseo':<20} | {'Media':<10} | {'Std Dev':<12} | {'Min [Frame]':<18} | {'Max [Frame]':<18} | {'Max Variazione %':<15}")
     print("-" * 105)
     
     total_max_variation = 0.0
@@ -109,7 +123,7 @@ def analyze_bone_length_variance(csv_path, bone_to_plot=None):
         
         plt.title(f'Andamento temporale della lunghezza ossea: {bone_to_plot}\nFile: {os.path.basename(csv_path)}')
         plt.xlabel('Frame')
-        plt.ylabel('Lunghezza (pixel)')
+        plt.ylabel('Lunghezza (unità)')
         plt.legend()
         plt.grid(True, linestyle=':', alpha=0.7)
         plt.tight_layout()
@@ -119,5 +133,5 @@ def analyze_bone_length_variance(csv_path, bone_to_plot=None):
 
 if __name__ == "__main__":
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    KIN_FILE = os.path.join(BASE_DIR, "recordings", "trial_1_Kinematics.csv") 
+    KIN_FILE = os.path.join(BASE_DIR, "recordings", "trial_6_Kinematics.csv") 
     analyze_bone_length_variance(KIN_FILE, bone_to_plot="Middle_Distal")
