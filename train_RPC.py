@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 import os
 import matplotlib.pyplot as plt
+import json
 
 # Importa l'architettura esatta dal tuo file locale
 from RPC_Net import RPCNet_Exact 
@@ -19,6 +20,24 @@ def train_model(train_file, val_file, epochs=50, batch_size=10):
     val_data = torch.load(val_file, weights_only=False)
     val_dataset = TensorDataset(val_data['X_emg'], val_data['X_ang'], val_data['Y_target'])
     
+    # --- CARICAMENTO IPERPARAMETRI ---
+    json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best_hyperparameters.json")
+    lr = 1e-4
+    eps = 1e-3
+    weight_decay = 0.0
+    
+    if os.path.exists(json_path):
+        print(f"Caricamento iperparametri ottimizzati da '{os.path.basename(json_path)}'...")
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            hps = data.get("hyperparameters", {})
+            lr = hps.get("lr", lr)
+            eps = hps.get("eps", eps)
+            weight_decay = hps.get("weight_decay", weight_decay)
+            batch_size = int(hps.get("batch_size", batch_size))
+    else:
+        print("File iperparametri non trovato. Uso i valori di default (RPC-Net paper).")
+
     # Creazione dei DataLoader
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
@@ -28,8 +47,8 @@ def train_model(train_file, val_file, epochs=50, batch_size=10):
     model = RPCNet_Exact(in_emg=512, in_ang=192)
     criterion = nn.MSELoss()
     
-    # Iperparametri hard-coded dal protocollo
-    optimizer = optim.Adam(model.parameters(), lr=1e-4, eps=1e-3, betas=(0.9, 0.99))
+    # Inizializzazione Ottimizzatore con parametri dinamici
+    optimizer = optim.Adam(model.parameters(), lr=lr, eps=eps, weight_decay=weight_decay, betas=(0.9, 0.99))
 
     # 4. Training Loop
     print(f"Avvio addestramento ({epochs} epoche)...")

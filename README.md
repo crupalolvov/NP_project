@@ -33,11 +33,36 @@ Nodo di archiviazione centrale responsabile della generazione dei dataset:
 - **Pulling Asincrono:** Recupera "chunks" di dati garantendo il non-blocco dei thread (essenziale ad alte frequenze).
 - **Strutturazione Dataset:** Concatena i dati su DataFrame e li esporta generando coppie di file `.csv` (`_EMG` e `_Kinematics`), condividendo la medesima base temporale ad alta risoluzione (`Timestamp_LSL`).
 
-### 4. 🧮 Analisi Cinematica Offline (`angles_kalman.py`)
-Modulo dedicato al calcolo della cinematica articolare e all'ottimizzazione del segnale visivo:
-- **Trigonometria Vettoriale:** Ricostruisce i vettori tridimensionali a partire dalle coordinate spaziali (falangi/metacarpi) derivando gli angoli di giunzione (es. CMC, MCP, PIP, DIP) tramite prodotto scalare.
-- **Filtro di Kalman (1D):** Implementa un filtro di Kalman univariato per mitigare in modo ottimale il rumore di misurazione e lo *jittering* intrinseco dei modelli di visione artificiale, fornendo un angolo "smoothed" altamente fedele all'effettiva biomeccanica della mano.
-- **Output Visivo e Analitico:** Produce grafici comparativi (Raw vs. Kalman) ed esporta i dati arricchiti in `_Angles_Kalman.csv`, ideali come label per i modelli di Machine/Deep Learning.
+
+### 4. 🗃️ Estrazione Feature e Creazione Tensori (`feature_ext.py`)
+Elabora i dataset LSL grezzi generando i tensori PyTorch finali (Z-score standardized) pronti per l'addestramento.
+- **Processing EMG:** Sottrazione della DC offset per singolo canale, filtraggio IIR passa-banda (20-450 Hz) + Notch (50, 100, 150 Hz), rettificazione e finestratura scorrevole per estrazione RMS (finestra 100ms, step 12.5ms → decima la frequenza a ~80 Hz).
+- **Processing Cinematica:** Interpolazione lineare della cinematica per combaciare rigorosamente con l'asse temporale decimato dell'EMG (80 Hz). Estrazione automatica della cinematica inversa (IKA) tramite `core_kin.py` se il dato d'ingresso è spaziale. Calcolo rest-angles e normalizzazione `[-150°, 90°] → [0, 1]`.
+- **Struttura Tensoriale:** Implementa il mapping storico per network densi. Da una finestra di 64 campioni (0.8s) applica sottocampionamento asimmetrico: 1:4 per l'EMG (genera array piatto 16 step x 32 canali = 512) e 1:8 per gli angoli storici (8 step x 24 DoF = 192). Esporta statistiche globali (media/varianza) ed i file `.pt` (`train_tensors.pt`, `val_tensors.pt`, `test_tensors.pt`).
+
+### 5. 🔍 Ottimizzazione Iperparametri (`RPC_optuna.py`)
+Implementa la ricerca Bayesiana degli iperparametri (HPO) della rete sfruttando il framework **Optuna**.
+- **Spazio di Ricerca (Search Space):** Ottimizzazione continua di *Learning Rate*, *Weight Decay*, *Batch Size* (categorico: 16, 32, 64, 128) e coefficiente *Epsilon* dell'ottimizzatore Adam.
+- **Efficienza Computazionale:** Utilizza `MedianPruner` per fermare precocemente le configurazioni stocastiche che presentano una perdita di validazione peggiore rispetto alla mediana dei trial storici.
+- **Output:** I parametri ottimali vengono iniettati in `best_hyperparameters.json` (che la rete caricherà in override). Genera automaticamente un report analitico interattivo in HTML per valutare la sensibilità del modello (`optuna_optimization_history.html`, `optuna_param_importances.html`, `optuna_slice_plot.html`).
+
+### 6. 🧠 Training RPC-Net (`train_RPC.py`)
+Inizializza, addestra e valida l'architettura neurale RPC-Net (Regressione Proporzionale Continua).
+- **Architettura:** Implementazione hard-coded dell'architettura parallela esatta (`RPCNet_Exact` definita in `RPC_Net.py`). Concatena i due rami di embedding (EMG ed Angoli passati) in un layer fully connected finale a 24 testine (per ogni DoF).
+- **Protocollo di Addestramento:** Caricamento dei tensori in memoria, auto-acquisizione dell'HPS in formato JSON. Implementa *Early Best Checkpoint* per sovrascrivere `rpc_net_weights.pth` minimizzando la Validation Loss globale (MSE).
+- **Output:** Stampa la loss cross-epocale a video e salva la curva di apprendimento `loss_convergence.png`.
+
+### 7. 🔮 Inferenza e Decodifica Offline (`inference.py`)
+Script di test diagnostico. Simula il comportamento causale della RPC-Net in ambiente real-time scorrendo array storici ad altissima risoluzione temporale su trial unseen.
+- **Domain Adaptation (Z-Score Locale):** Normalizza i buffer EMG utilizzando la media e deviazione standard del trial target anziché le globali estratte in fase di train. Questo stabilizza la predizione contro le severe fluttuazioni di conduttanza elettrodo-pelle (shift di impedenza tra sessioni/sensori).
+- **Smoothing Causale:** Post-elaborazione delle traiettorie angolari predette utilizzando un filtro passa-basso ricorsivo unidirezionale Butterworth (4° ordine).
+- **Decodifica Forward Kinematics (FK):** Attraverso la topologia ossea calibrata (`hand_calibration.pt`), inverte i 24 angoli articolari riconvertendoli in 21 Landmark Metrici 3D nello spazio globale (`_lms.csv`).
+
+### 8. 🎞️ Animazione e Analisi Visuale 3D (`animate_raw_kinematics.py`)
+Strumento di debug per la diagnostica della cinematica umana rigida, predetta e cruda (Ground Truth vs Predetto).
+- **Rendering Multiplo:** Ingesta simultaneamente multipli `.csv` tridimensionali. Resampla il tutto in sincronia perfetta a una frequenza bersaglio comune (es. 25-80 Hz).
+- **Compensazione Offset Spaziale:** Applica una traslazione forzata, azzerando le coordinate del polso all'origine per tutti i modelli, sovrapponendoli per separazione orizzontale in un'unica griglia isometrica di comparazione visiva.
+- **Animazione Interattiva:** Gestisce polilinee, triangolazioni e nodi sparsi in `matplotlib.animation` sfruttando keyframe temporali per il monitoraggio analitico delle discrepanze o violazioni ROM.
 
 ---
 
@@ -46,7 +71,7 @@ Modulo dedicato al calcolo della cinematica articolare e all'ottimizzazione del 
 L'ambiente richiede Python 3.10+. Per installare l'intero stack di dipendenze matematiche, di visione e di rete:
 
 ```bash
-pip install mediapipe pylsl opencv-python pandas numpy scipy PyQt5 pyqtgraph matplotlib
+pip install -r requirements.txt
 ```
 
 **Nota sul modello di Visione:**
@@ -77,7 +102,34 @@ Per registrare un trial di acquisizione (es. durante l'esecuzione di task motori
    ```bash
    python record_LSL.py
    ```
-   Lo script cercherà automaticamente i due flussi nella rete locale. Una volta agganciati, inizierà il pull dei dati e salverà al termine i dataset in locale.
+   Lo script cercherà automaticamente i due flussi nella rete locale. Una volta agganciati, è possibile avviare e fermare la registrazione premendo il tasto `R`. I dati verranno salvati al termine di ogni registrazione.
+
+4. **Addestramento del Modello e Inferenza:**
+   Una volta acquisiti i trial, è possibile procedere con l'addestramento della rete neurale.
+
+   a. **Generazione dei Tensori:**
+   Lancia lo script `feature_ext.py`. Questo script processerà tutti i trial nella cartella `recordings/`, eseguirà l'estrazione delle feature (RMS per EMG, IKA per cinematica), li dividerà in set di training, validazione e test, e salverà i tensori finali (`train_tensors.pt`, `val_tensors.pt`, `test_tensors.pt`).
+   ```bash
+   python feature_ext.py
+   ```
+
+   b. **(Opzionale) Ottimizzazione Iperparametri:**
+   Per trovare i migliori iperparametri per la rete, esegui `RPC_optuna.py`. Questo avvierà una ricerca Bayesiana e salverà la configurazione ottimale in `best_hyperparameters.json`.
+   ```bash
+   python RPC_optuna.py
+   ```
+
+   c. **Addestramento Rete:**
+   Avvia il training con `train_RPC.py`. Lo script caricherà automaticamente i tensori e gli iperparametri (se presenti) e salverà i pesi del modello migliore (`rpc_net_weights.pth`).
+   ```bash
+   python train_RPC.py
+   ```
+
+   d. **Esecuzione Inferenza Offline:**
+   Per testare il modello addestrato su un trial non visto (es. `trial_6`), modifica la variabile `TRIAL_TEST` in `inference.py` e lancialo. Lo script utilizzerà il file `_EMG_RMS.csv` (generato da `feature_ext.py`) per produrre le cinematiche predette. Questo genererà un file `_predicted_kinematics_lms.csv` che può essere visualizzato con `animate_raw_kinematics.py`.
+   ```bash
+   python inference.py
+   ```
 
 ---
 
@@ -91,11 +143,10 @@ Al termine della registrazione, lo script genererà due file per ogni trial:
 
 - `[prefisso]_Kinematics.csv`:
   - `Timestamp_LSL`: Timestamp di rete ad alta precisione.
-  - `LM_0_X`, `LM_0_Y`, `LM_0_Z` ... `LM_20_Z`: Coordinate spaziali per la ricostruzione topologica della mano (polso, nocche, falangi).
+  - `LM_0_X`, `LM_0_Y`, `LM_0_Z` ... `LM_20_Z`: Coordinate spaziali **in metri** (world landmarks) per la ricostruzione topologica della mano (polso, nocche, falangi).
 
 *Sviluppato per un progetto in ambito Neural Prostheses presso la Scuola Superiore Sant'Anna & Università di Pisa.*
 Supervisor: Prof. Silvestro Micera, Dr. Elena Losanno, Dr. Vincent Mendez
-Co-supervisors: Dr. Elena Losanno, Dr. Vincent Mendez
 PhD Co-supervisor: Firman Isma Serdana
 
 Alumni:

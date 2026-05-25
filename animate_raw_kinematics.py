@@ -236,7 +236,7 @@ def visualize_synced_csv(csv_paths, target_fps=80.0):
 
 if __name__ == "__main__":
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    TRIAL = 9
+    TRIAL = 6
     
     CSV_FILE_1 = os.path.join(BASE_DIR, "recordings", f"trial_{TRIAL}_Kinematics.csv") 
     CSV_FILE_2 = os.path.join(BASE_DIR, "recordings", f"trial_{TRIAL}_Kinematics_preprocessed.csv")

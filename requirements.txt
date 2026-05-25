@@ -8,3 +8,6 @@ pylsl
 pandas
 matplotlib
 torch
+optuna
+plotly
+pynput
