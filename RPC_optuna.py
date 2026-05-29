@@ -20,7 +20,7 @@ JSON_OUTPUT_PATH = os.path.join(BASE_DIR, "best_hyperparameters.json")
 # Variabili globali per l'allocazione efficiente della memoria
 TRAIN_DATASET = None
 VAL_DATASET = None
-EPOCHS_PER_TRIAL = 40  # Numero massimo di epoche per singolo tentativo
+EPOCHS_PER_TRIAL = 15   # Numero massimo di epoche per singolo tentativo
 
 def load_datasets():
     """Carica i tensori di addestramento e validazione in memoria globale."""
@@ -35,50 +35,59 @@ def load_datasets():
     print("Data loading completato con successo.")
 
 def objective(trial):
-    """Funzione obiettivo che Optuna cercherà di minimizzare."""
+    """Funzione obiettivo ottimizzata con accelerazione MPS per Mac."""
     print(f"\n---> Avvio Trial {trial.number}...")
     
-    # 1. Definizione dello spazio di ricerca (Search Space)
+    # Configurazione del Device (Usa la GPU del Mac se disponibile)
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    
+    # 1. Spazio di ricerca
     lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
     weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)
     batch_size = trial.suggest_categorical("batch_size", [16, 32, 64, 128])
     eps = trial.suggest_float("eps", 1e-8, 1e-3, log=True)
 
-    # Stampa i parametri scelti per questo trial
-    print(f"     Parametri: lr={lr:.2e}, wd={weight_decay:.2e}, batch={batch_size}, eps={eps:.2e}")
+    print(f"     Parametri: lr={lr:.2e}, wd={weight_decay:.2e}, batch={batch_size}, eps={eps:.2e} | Device: {device}")
 
-    # 2. Inizializzazione DataLoader specifici per il trial corrente
+    # 2. DataLoader
     train_loader = DataLoader(TRAIN_DATASET, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(VAL_DATASET, batch_size=batch_size, shuffle=False)
 
-    # 3. Allocazione del modello e dei relativi solutori
-    model = RPCNet_Exact(in_emg=512, in_ang=192)
+    # 3. Modello spostato su GPU/MPS
+    model = RPCNet_Exact(in_emg=512, in_ang=192).to(device)
+    model = torch.jit.script(model)  # Compilazione JIT per prestazioni ottimali su MPS e PARALLELE
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(
-        model.parameters(), 
-        lr=lr, 
-        weight_decay=weight_decay, 
-        eps=eps, 
-        betas=(0.9, 0.99)
-    )
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay, eps=eps, betas=(0.9, 0.99))
 
     best_trial_val_loss = float('inf')
+    
+    # RIDOTTO: 15 epoche sono più che sufficienti per stimare la bontà dei parametri
+    EPOCHS_SEARCH = 15 
 
-    # 4. Ciclo di addestramento (Training Loop)
-    for epoch in range(EPOCHS_PER_TRIAL):
+    # 4. Training Loop
+    for epoch in range(EPOCHS_SEARCH):
         model.train()
         for batch_emg, batch_ang, batch_target in train_loader:
+            # Spostiamo i singoli batch sul device corrente (MPS)
+            batch_emg = batch_emg.to(device)
+            batch_ang = batch_ang.to(device)
+            batch_target = batch_target.to(device)
+            
             optimizer.zero_grad()
             predictions = model(batch_emg, batch_ang)
             loss = criterion(predictions, batch_target)
             loss.backward()
             optimizer.step()
 
-        # Ciclo di validazione (Validation Loop)
+        # Validation Loop
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
             for val_emg, val_ang, val_target in val_loader:
+                val_emg = val_emg.to(device)
+                val_ang = val_ang.to(device)
+                val_target = val_target.to(device)
+                
                 val_preds = model(val_emg, val_ang)
                 val_loss += criterion(val_preds, val_target).item()
         
@@ -87,48 +96,16 @@ def objective(trial):
         if avg_val_loss < best_trial_val_loss:
             best_trial_val_loss = avg_val_loss
 
-        # --- PROGRESSO A SCHERMO ---
-        # Stampa l'aggiornamento ogni 5 epoche, oppure alla primissima epoca
-        if (epoch + 1) % 5 == 0 or epoch == 0:
-            print(f"     [Trial {trial.number}] Epoca {epoch+1}/{EPOCHS_PER_TRIAL} | Val Loss: {avg_val_loss:.6f}")
+        if (epoch + 1) % 3 == 0 or epoch == 0:
+            print(f"     [Trial {trial.number}] Epoca {epoch+1}/{EPOCHS_SEARCH} | Val Loss: {avg_val_loss:.6f}")
 
-        # 5. Meccanismo di Pruning (Potatura precoce dei trial non convergenti)
+        # 5. Pruning attivo prima (dopo 3 trial invece di 5)
         trial.report(avg_val_loss, epoch)
         if trial.should_prune():
-            print(f"     [!] Trial {trial.number} potato all'epoca {epoch+1} (scarse prestazioni).")
+            print(f"     [!] Trial {trial.number} potato all'epoca {epoch+1} per scarse prestazioni.")
             raise optuna.exceptions.TrialPruned()
 
     print(f"---> Fine Trial {trial.number} | Miglior Val Loss: {best_trial_val_loss:.6f}")
-    return best_trial_val_loss
-
-    # 4. Ciclo di addestramento (Training Loop)
-    for epoch in range(EPOCHS_PER_TRIAL):
-        model.train()
-        for batch_emg, batch_ang, batch_target in train_loader:
-            optimizer.zero_grad()
-            predictions = model(batch_emg, batch_ang)
-            loss = criterion(predictions, batch_target)
-            loss.backward()
-            optimizer.step()
-
-        # Ciclo di validazione (Validation Loop)
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for val_emg, val_ang, val_target in val_loader:
-                val_preds = model(val_emg, val_ang)
-                val_loss += criterion(val_preds, val_target).item()
-        
-        avg_val_loss = val_loss / len(val_loader)
-        
-        if avg_val_loss < best_trial_val_loss:
-            best_trial_val_loss = avg_val_loss
-
-        # 5. Meccanismo di Pruning (Potatura precoce dei trial non convergenti)
-        trial.report(avg_val_loss, epoch)
-        if trial.should_prune():
-            raise optuna.exceptions.TrialPruned()
-
     return best_trial_val_loss
 
 def save_results(study):
@@ -185,7 +162,7 @@ if __name__ == "__main__":
         study_name="RPC_Net_Hyperparameter_Optimization",
         storage=DB_PATH,
         load_if_exists=True,
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=6)
     )
     
     print("\nAvvio del processo di ottimizzazione bayesiana con Optuna...")

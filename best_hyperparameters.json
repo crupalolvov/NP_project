@@ -1,0 +1,11 @@
+{
+    "study_name": "RPC_Net_Hyperparameter_Optimization",
+    "best_validation_loss": 0.00179927069766877,
+    "best_trial_number": 11,
+    "hyperparameters": {
+        "lr": 0.009080791485741816,
+        "weight_decay": 1.5362461412446153e-06,
+        "batch_size": 16,
+        "eps": 1.7789424562495205e-05
+    }
+}
