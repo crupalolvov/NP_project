@@ -1,0 +1,2314 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🦾 Protesi Neurali - Interactive Evaluation Dashboard</title>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <!-- Three.js & OrbitControls -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <style>
+        :root {
+            --bg-gradient: linear-gradient(135deg, #060913 0%, #0d1527 50%, #170d2b 100%);
+            --glass-bg: rgba(10, 18, 36, 0.75);
+            --glass-border: rgba(255, 255, 255, 0.08);
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --accent-cyan: #06b6d4;
+            --accent-indigo: #6366f1;
+            --accent-emerald: #10b981;
+            --accent-rose: #f43f5e;
+            --accent-amber: #f59e0b;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg-gradient);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+            padding: 1.5rem;
+        }
+
+        h1, h2, h3, .font-outfit {
+            font-family: 'Outfit', sans-serif;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(15, 23, 42, 0.5);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(99, 102, 241, 0.3);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(99, 102, 241, 0.6);
+        }
+
+        /* Glassmorphism Classes */
+        .glass-card {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-radius: 16px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .glass-card:hover {
+            border-color: rgba(99, 102, 241, 0.2);
+            box-shadow: 0 12px 40px 0 rgba(99, 102, 241, 0.08);
+        }
+
+        /* Layout Grid */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            padding: 1rem 1.5rem;
+        }
+
+        .header h1 {
+            font-size: 1.8rem;
+            font-weight: 800;
+            background: linear-gradient(to right, #ffffff, #818cf8, #22d3ee);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.5px;
+        }
+
+        .header p {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            margin-top: 2px;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 1rem;
+        }
+
+        .tab-btn {
+            background: rgba(99, 102, 241, 0.08);
+            border: 1px solid rgba(99, 102, 241, 0.15);
+            color: var(--text-secondary);
+            padding: 0.6rem 1.2rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            transition: all 0.2s ease;
+        }
+
+        .tab-btn.active, .tab-btn:hover {
+            background: var(--accent-indigo);
+            border-color: var(--accent-indigo);
+            color: white;
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.35);
+        }
+
+        /* Main Workspace Grid */
+        .workspace {
+            display: grid;
+            grid-template-columns: 330px 1fr;
+            gap: 1.5rem;
+            height: calc(100vh - 100px);
+            align-items: stretch;
+        }
+
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            overflow-y: auto;
+            padding-right: 4px;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-rows: auto 1fr;
+            gap: 1.5rem;
+            overflow: hidden;
+        }
+
+        /* Sections content */
+        .tab-content {
+            display: none;
+            height: 100%;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        /* Dropzone Styling */
+        .dropzone-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.6rem;
+        }
+
+        .dropzone {
+            border: 2px dashed rgba(99, 102, 241, 0.25);
+            background: rgba(99, 102, 241, 0.02);
+            border-radius: 12px;
+            padding: 0.8rem 0.4rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 110px;
+        }
+
+        .dropzone.hover {
+            border-color: var(--accent-cyan);
+            background: rgba(6, 182, 212, 0.05);
+            transform: scale(1.02);
+        }
+
+        .dropzone.success {
+            border-color: var(--accent-emerald);
+            background: rgba(16, 185, 129, 0.05);
+        }
+
+        .dropzone i {
+            font-size: 1.4rem;
+            margin-bottom: 0.3rem;
+            color: var(--accent-indigo);
+            transition: all 0.3s ease;
+        }
+
+        .dropzone.hover i {
+            color: var(--accent-cyan);
+            transform: translateY(-4px);
+        }
+
+        .dropzone.success i {
+            color: var(--accent-emerald);
+        }
+
+        .dropzone h4 {
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-bottom: 0.2rem;
+        }
+
+        .dropzone p {
+            font-size: 0.65rem;
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 100%;
+        }
+
+        /* Metrics Card */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 1rem;
+        }
+
+        .metric-card {
+            padding: 1.2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.8rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .metric-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 4px;
+            height: 100%;
+        }
+
+        .metric-card.cyan::before { background: var(--accent-cyan); }
+        .metric-card.indigo::before { background: var(--accent-indigo); }
+
+        .metric-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .metric-title {
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-secondary);
+        }
+
+        .metric-val {
+            font-size: 2.2rem;
+            font-weight: 800;
+            line-height: 1;
+            font-family: 'Outfit', sans-serif;
+            background: linear-gradient(to right, white, #e2e8f0);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .metric-stats {
+            display: flex;
+            justify-content: space-between;
+            background: rgba(15, 23, 42, 0.4);
+            border-radius: 8px;
+            padding: 0.5rem 0.8rem;
+            font-size: 0.75rem;
+            border: 1px solid rgba(255, 255, 255, 0.02);
+        }
+
+        .stat-item {
+            display: flex;
+            flex-direction: column;
+            gap: 0.1rem;
+        }
+
+        .stat-item span:first-child {
+            color: var(--text-secondary);
+            font-size: 0.65rem;
+            text-transform: uppercase;
+        }
+
+        .stat-item span:last-child {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        /* 3D and Graph Workspace */
+        .visualizer-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+            height: 100%;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .threejs-panel {
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+
+        .threejs-panel.expanded {
+            position: fixed;
+            top: 1.5rem;
+            left: 1.5rem;
+            width: calc(100vw - 3rem);
+            height: calc(100vh - 3rem);
+            z-index: 100;
+        }
+
+        .threejs-container {
+            flex-grow: 1;
+            background: radial-gradient(circle at center, #070e20 0%, #03050b 100%);
+            position: relative;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid rgba(99, 102, 241, 0.05);
+        }
+
+        .threejs-overlay {
+            position: absolute;
+            top: 0.8rem;
+            left: 0.8rem;
+            background: rgba(9, 15, 30, 0.85);
+            padding: 0.4rem 0.8rem;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            border: 1px solid var(--glass-border);
+            z-index: 10;
+            pointer-events: none;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .threejs-overlay span {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent-cyan);
+            box-shadow: 0 0 8px var(--accent-cyan);
+        }
+
+        .threejs-legend {
+            position: absolute;
+            bottom: 4.5rem;
+            left: 0.8rem;
+            background: rgba(9, 15, 30, 0.9);
+            padding: 0.6rem 0.8rem;
+            border-radius: 8px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            border: 1px solid var(--glass-border);
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            pointer-events: none;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .legend-dot {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        .legend-dot.original-dot {
+            background: #00ff88;
+            box-shadow: 0 0 8px #00ff88;
+        }
+
+        .legend-dot.predicted-dot {
+            background: #ff0066;
+            box-shadow: 0 0 8px #ff0066;
+        }
+
+        .legend-text {
+            color: var(--text-secondary);
+        }
+
+        .maximize-btn {
+            position: absolute;
+            top: 0.8rem;
+            right: 0.8rem;
+            background: rgba(9, 15, 30, 0.85);
+            border: 1px solid var(--glass-border);
+            color: var(--text-primary);
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            z-index: 10;
+            transition: all 0.2s ease;
+        }
+
+        .maximize-btn:hover {
+            background: var(--accent-indigo);
+            border-color: var(--accent-indigo);
+            color: white;
+            transform: scale(1.05);
+        }
+
+        /* Controller Bar */
+        .controls-bar {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 0.8rem 1rem;
+            border-top: 1px solid var(--glass-border);
+        }
+
+        .play-btn {
+            background: var(--accent-indigo);
+            border: none;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            color: white;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+        }
+
+        .play-btn:hover {
+            transform: scale(1.08);
+            background: #4f46e5;
+        }
+
+        .scrubber-container {
+            flex-grow: 1;
+            display: flex;
+            align-items: center;
+            gap: 0.8rem;
+        }
+
+        .scrubber {
+            flex-grow: 1;
+            -webkit-appearance: none;
+            appearance: none;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.1);
+            outline: none;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .scrubber::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--accent-cyan);
+            cursor: pointer;
+            box-shadow: 0 0 10px var(--accent-cyan);
+            transition: all 0.1s ease;
+        }
+
+        .scrubber::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+        }
+
+        .time-label {
+            font-size: 0.75rem;
+            font-family: monospace;
+            color: var(--text-secondary);
+            min-width: 60px;
+            text-align: right;
+        }
+
+        /* Right Trajectory Panel */
+        .chart-panel {
+            padding: 1.2rem;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        }
+
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .chart-title {
+            font-size: 0.95rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .chart-select {
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid var(--glass-border);
+            color: var(--text-primary);
+            padding: 0.4rem 0.8rem;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            outline: none;
+            cursor: pointer;
+        }
+
+        .chart-select:focus {
+            border-color: var(--accent-indigo);
+        }
+
+        .chart-container {
+            position: relative;
+            flex-grow: 1;
+            width: 100%;
+            height: 0;
+        }
+
+        /* Tab 2: Architecture Documentation Panel */
+        .doc-container {
+            display: grid;
+            grid-template-columns: 1fr 340px;
+            gap: 1.5rem;
+            height: 100%;
+            overflow-y: auto;
+            padding-right: 4px;
+        }
+
+        .doc-flow {
+            display: flex;
+            flex-direction: column;
+            gap: 1.2rem;
+        }
+
+        .step-card {
+            padding: 1.5rem;
+            display: grid;
+            grid-template-columns: 48px 1fr;
+            gap: 1.2rem;
+            position: relative;
+        }
+
+        .step-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(99, 102, 241, 0.1);
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            color: var(--accent-indigo);
+        }
+
+        .step-card:nth-child(even) .step-icon {
+            background: rgba(6, 182, 212, 0.1);
+            border: 1px solid rgba(6, 182, 212, 0.2);
+            color: var(--accent-cyan);
+        }
+
+        .step-card h3 {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 0.3rem;
+        }
+
+        .step-card p {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+
+        .step-badge {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            font-size: 0.65rem;
+            font-weight: 700;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            color: var(--text-secondary);
+            border: 1px solid rgba(255, 255, 255, 0.03);
+        }
+
+        .doc-sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 1.2rem;
+        }
+
+        .author-card {
+            padding: 1.5rem;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.8rem;
+        }
+
+        .avatar {
+            width: 72px;
+            height: 72px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--accent-indigo) 0%, var(--accent-cyan) 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 1.8rem;
+            font-weight: 800;
+            font-family: 'Outfit', sans-serif;
+            box-shadow: 0 8px 24px rgba(99, 102, 241, 0.25);
+        }
+
+        .author-card h4 {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .author-card p {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .author-list {
+            background: rgba(15, 23, 42, 0.4);
+            border-radius: 8px;
+            padding: 0.8rem;
+            width: 100%;
+            font-size: 0.8rem;
+            text-align: left;
+            border: 1px solid rgba(255, 255, 255, 0.02);
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+
+        .author-list-item {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            color: var(--text-primary);
+        }
+
+        .author-list-item i {
+            font-size: 0.8rem;
+            color: var(--accent-cyan);
+        }
+
+        .instructions-card {
+            padding: 1.2rem;
+            font-size: 0.8rem;
+            line-height: 1.5;
+        }
+
+        .instructions-card h4 {
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            color: var(--accent-amber);
+        }
+
+        .instructions-card ol {
+            padding-left: 1.2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            color: var(--text-secondary);
+        }
+
+        .instructions-card li strong {
+            color: var(--text-primary);
+        }
+
+        /* Warning alert for no loaded files */
+        .placeholder-visualizer {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 1rem;
+            height: 100%;
+            color: var(--text-secondary);
+            text-align: center;
+            padding: 2rem;
+        }
+
+        .placeholder-visualizer i {
+            font-size: 3.5rem;
+            color: rgba(99, 102, 241, 0.2);
+            animation: pulse 2s infinite ease-in-out;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 0.6; }
+            50% { transform: scale(1.05); opacity: 1; }
+        }
+
+        .placeholder-visualizer h3 {
+            font-size: 1.1rem;
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+
+        .placeholder-visualizer p {
+            font-size: 0.8rem;
+            max-width: 320px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Header Section -->
+    <header class="glass-card header">
+        <div>
+            <h1>🦾 NEURAL PROSTHESES EVALUATION SUITE</h1>
+            <p>Sincronizzazione LSL HD-EMG & Hand Tracking Biomeccanico (RPC-Net vs Ground Truth)</p>
+        </div>
+        <div class="tabs">
+            <button class="tab-btn active" onclick="switchTab('visualizer')">
+                <i data-lucide="eye"></i> 3D Tracking & Grafici
+            </button>
+            <button class="tab-btn" onclick="switchTab('architecture')">
+                <i data-lucide="network"></i> Architettura & Pipeline
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Grid Workspace -->
+    <main class="workspace">
+        
+        <!-- Sidebar Controls & Metrics -->
+        <section class="sidebar">
+            
+            <!-- File Uploader Card -->
+            <div class="glass-card" style="padding: 1.2rem; display: flex; flex-direction: column; gap: 0.8rem;">
+                <h3 style="font-size: 0.95rem; font-weight: 600; display: flex; align-items: center; gap: 0.5rem;">
+                    <i data-lucide="upload-cloud" style="color: var(--accent-cyan); width: 18px; height: 18px;"></i>
+                    Caricamento Dataset
+                </h3>
+                
+                <div style="font-size: 0.7rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.2rem;">1. Ground Truth</div>
+                <div class="dropzone-container">
+                    <div id="dropzone-true-lms" class="dropzone" onclick="document.getElementById('file-true-lms').click()">
+                        <i data-lucide="activity"></i>
+                        <h4>Landmarks</h4>
+                        <p id="label-true-lms">CSV Metrico</p>
+                        <input type="file" id="file-true-lms" style="display: none;" accept=".csv" onchange="handleFileSelect(this, 'true-lms')">
+                    </div>
+                    
+                    <div id="dropzone-true-angles" class="dropzone" onclick="document.getElementById('file-true-angles').click()">
+                        <i data-lucide="settings"></i>
+                        <h4>Angoli (IKA)</h4>
+                        <p id="label-true-angles">CSV 24 DoF</p>
+                        <input type="file" id="file-true-angles" style="display: none;" accept=".csv" onchange="handleFileSelect(this, 'true-angles')">
+                    </div>
+                </div>
+
+                <div style="font-size: 0.7rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.2rem; margin-top: 0.2rem;">2. Predizioni (RPC-Net)</div>
+                <div class="dropzone-container">
+                    <div id="dropzone-pred-lms" class="dropzone" onclick="document.getElementById('file-pred-lms').click()">
+                        <i data-lucide="cpu"></i>
+                        <h4>Landmarks</h4>
+                        <p id="label-pred-lms">CSV Metrico</p>
+                        <input type="file" id="file-pred-lms" style="display: none;" accept=".csv" onchange="handleFileSelect(this, 'pred-lms')">
+                    </div>
+                    
+                    <div id="dropzone-pred-angles" class="dropzone" onclick="document.getElementById('file-pred-angles').click()">
+                        <i data-lucide="binary"></i>
+                        <h4>Angoli (Pred)</h4>
+                        <p id="label-pred-angles">CSV 24 DoF</p>
+                        <input type="file" id="file-pred-angles" style="display: none;" accept=".csv" onchange="handleFileSelect(this, 'pred-angles')">
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Dynamic Metrics Panel -->
+            <div class="glass-card" style="padding: 1.2rem; flex-grow: 1; display: flex; flex-direction: column; gap: 1rem;">
+                <h3 style="font-size: 0.95rem; font-weight: 600; display: flex; align-items: center; gap: 0.5rem;">
+                    <i data-lucide="bar-chart-3" style="color: var(--accent-cyan); width: 18px; height: 18px;"></i>
+                    Metriche di Accuratezza
+                </h3>
+                
+                <div class="metrics-grid">
+                    <!-- MPCC Card -->
+                    <div class="glass-card metric-card cyan">
+                        <div class="metric-header">
+                            <span id="mpcc-label" class="metric-title">MPCC (Correlazione)</span>
+                            <i data-lucide="percent" style="color: var(--accent-cyan); width: 16px; height: 16px;"></i>
+                        </div>
+                        <div id="val-mpcc" class="metric-val">--.- %</div>
+                        <div class="metric-stats">
+                            <div class="stat-item">
+                                <span>Mediana</span>
+                                <span id="val-mpcc-med">--.- %</span>
+                            </div>
+                            <div class="stat-item">
+                                <span>Tertili (T1/T2)</span>
+                                <span id="val-mpcc-tert">-- / --</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- MD Card -->
+                    <div class="glass-card metric-card indigo">
+                        <div class="metric-header">
+                            <span class="metric-title">Mean Distance (WFD)</span>
+                            <i data-lucide="rulers" style="color: var(--accent-indigo); width: 16px; height: 16px;"></i>
+                        </div>
+                        <div id="val-md" class="metric-val">--.-- mm</div>
+                        <div class="metric-stats">
+                            <div class="stat-item">
+                                <span>Mediana</span>
+                                <span id="val-md-med">--.-- mm</span>
+                            </div>
+                            <div class="stat-item">
+                                <span>Tertili (T1/T2)</span>
+                                <span id="val-md-tert">-- / --</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Quick Info -->
+                <div class="glass-card instructions-card" style="margin-top: auto; background: rgba(99, 102, 241, 0.03);">
+                    <h4><i data-lucide="info" style="width: 14px; height: 14px;"></i> Metodo di Valutazione</h4>
+                    <p style="font-size: 0.72rem; color: var(--text-secondary); line-height: 1.4;">
+                        Le metriche sono ricalcolate in JS su <strong>interpolazione lineare 1D</strong>. I primi <strong>0.78s (64 campioni)</strong> vengono scartati (transiente). I landmark 3D vengono <strong>centrati sul polso (LM_0)</strong> ad ogni frame per confrontare esclusivamente la posa intrinseca della mano.
+                    </p>
+                </div>
+            </div>
+            
+        </section>
+        
+        <!-- Tab Content 1: Visualizer -->
+        <section id="content-visualizer" class="tab-content active main-content">
+            
+            <div class="visualizer-container">
+                
+                <!-- Left 3D Panel -->
+                <div class="glass-card threejs-panel">
+                    <div class="threejs-overlay">
+                        <span></span> 3D HOLOGRAPHIC SKELETON
+                    </div>
+                    
+                    <!-- Maximize button -->
+                    <button id="btn-maximize" class="maximize-btn" onclick="toggleMaximize()" disabled>
+                        <i data-lucide="maximize-2"></i>
+                    </button>
+                    
+                    <!-- Three.js Canvas Container -->
+                    <div id="threejs-container" class="threejs-container">
+                        <!-- Alert when no data loaded -->
+                        <div id="threejs-placeholder" class="placeholder-visualizer">
+                            <i data-lucide="hand"></i>
+                            <h3>Visualizzatore 3D della Mano</h3>
+                            <p>Carica i file CSV a sinistra (Ground Truth e Predizioni dei Landmarks) per avviare la ricostruzione scheletrica 3D interattiva.</p>
+                        </div>
+                    </div>
+                    
+                    <!-- Stylish floating legend -->
+                    <div id="threejs-legend" class="threejs-legend" style="display: none;">
+                        <div class="legend-item">
+                            <span class="legend-dot original-dot"></span>
+                            <span class="legend-text">Original (Ground Truth)</span>
+                        </div>
+                        <div class="legend-item">
+                            <span class="legend-dot predicted-dot"></span>
+                            <span class="legend-text">Predicted (RPC-Net)</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Scrubbing Bar -->
+                    <div class="controls-bar">
+                        <button id="btn-play" class="play-btn" disabled>
+                            <i data-lucide="play" id="play-icon"></i>
+                        </button>
+                        <div class="scrubber-container">
+                            <input type="range" id="time-scrubber" class="scrubber" value="0" min="0" max="100" disabled>
+                            <span id="label-time" class="time-label">0.00 s</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Right Graph Panel -->
+                <div class="glass-card chart-panel">
+                    <div class="chart-header" style="flex-direction: column; align-items: stretch; gap: 0.8rem; margin-bottom: 1rem;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <h3 class="chart-title" style="font-size: 0.95rem;">
+                                <i data-lucide="trending-up" style="color: var(--accent-indigo); width: 18px; height: 18px;"></i>
+                                Analisi Temporale Sincronizzata
+                            </h3>
+                            <div id="chart-mode-container" style="display: none; gap: 0.4rem; align-items: center;">
+                                <span style="font-size: 0.65rem; color: var(--text-secondary); text-transform: uppercase; font-weight: 600;">Modo:</span>
+                                <select id="chart-mode-select" class="chart-select" onchange="switchChartMode()">
+                                    <option value="lms">📍 Landmark 3D</option>
+                                    <option value="angles">🎛️ Angoli Giunti (DoFs)</option>
+                                    <option value="error">⚠️ Errore di Predizione</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <!-- Landmark select dropdown -->
+                        <select id="chart-dof-select" class="chart-select" style="width: 100%;" onchange="initChart()" disabled>
+                            <optgroup label="Estensione Dita dal Polso (WFD in mm)">
+                                <option value="wfd_thumb">Distanza Pollice (Tip 4 dal Polso)</option>
+                                <option value="wfd_index" selected>Distanza Indice (Tip 8 dal Polso)</option>
+                                <option value="wfd_middle">Distanza Medio (Tip 12 dal Polso)</option>
+                                <option value="wfd_ring">Distanza Anulare (Tip 16 dal Polso)</option>
+                                <option value="wfd_pinky">Distanza Mignolo (Tip 20 dal Polso)</option>
+                                <option value="wfd_mean">Estensione Media WFD (Tutte le 5 dita)</option>
+                            </optgroup>
+                            <optgroup label="Coordinate Spaziali Relative (Meters)">
+                                <option value="coord_thumb_x">Pollice X (LM 4 dal Polso)</option>
+                                <option value="coord_thumb_y">Pollice Y (LM 4 dal Polso)</option>
+                                <option value="coord_thumb_z">Pollice Z (LM 4 dal Polso)</option>
+                                <option value="coord_index_x">Indice X (LM 8 dal Polso)</option>
+                                <option value="coord_index_y">Indice Y (LM 8 dal Polso)</option>
+                                <option value="coord_index_z">Indice Z (LM 8 dal Polso)</option>
+                                <option value="coord_middle_x">Medio X (LM 12 dal Polso)</option>
+                                <option value="coord_middle_y">Medio Y (LM 12 dal Polso)</option>
+                                <option value="coord_middle_z">Medio Z (LM 12 dal Polso)</option>
+                                <option value="coord_ring_x">Anulare X (LM 16 dal Polso)</option>
+                                <option value="coord_ring_y">Anulare Y (LM 16 dal Polso)</option>
+                                <option value="coord_ring_z">Anulare Z (LM 16 dal Polso)</option>
+                                <option value="coord_pinky_x">Mignolo X (LM 20 dal Polso)</option>
+                                <option value="coord_pinky_y">Mignolo Y (LM 20 dal Polso)</option>
+                                <option value="coord_pinky_z">Mignolo Z (LM 20 dal Polso)</option>
+                            </optgroup>
+                        </select>
+                        
+                        <!-- Joint select dropdown (hidden by default) -->
+                        <select id="chart-angle-select" class="chart-select" style="width: 100%; display: none;" onchange="initChart()">
+                            <optgroup label="Polso (Wrist - DoF 0-2)">
+                                <option value="0">DoF 0 - Flessione/Estensione Polso</option>
+                                <option value="1">DoF 1 - Deviazione Ulnare/Radiale Polso</option>
+                                <option value="2">DoF 2 - Pronazione/Supinazione Avambraccio</option>
+                            </optgroup>
+                            <optgroup label="Pollice (Thumb - DoF 3-7)">
+                                <option value="3">DoF 3 - CMC Flessione/Estensione</option>
+                                <option value="4">DoF 4 - CMC Abduzione/Adduzione</option>
+                                <option value="5">DoF 5 - MCP Flessione/Estensione</option>
+                                <option value="6">DoF 6 - MCP Abduzione/Adduzione</option>
+                                <option value="7">DoF 7 - IP Flessione/Estensione</option>
+                            </optgroup>
+                            <optgroup label="Indice (Index - DoF 8-11)">
+                                <option value="8">DoF 8 - MCP Flessione/Estensione</option>
+                                <option value="9">DoF 9 - MCP Abduzione/Adduzione</option>
+                                <option value="10">DoF 10 - PIP Flessione/Estensione</option>
+                                <option value="11">DoF 11 - DIP Flessione/Estensione</option>
+                            </optgroup>
+                            <optgroup label="Medio (Middle - DoF 12-15)">
+                                <option value="12">DoF 12 - MCP Flessione/Estensione</option>
+                                <option value="13">DoF 13 - MCP Abduzione/Adduzione</option>
+                                <option value="14">DoF 14 - PIP Flessione/Estensione</option>
+                                <option value="15">DoF 15 - DIP Flessione/Estensione</option>
+                            </optgroup>
+                            <optgroup label="Anulare (Ring - DoF 16-19)">
+                                <option value="16">DoF 16 - MCP Flessione/Estensione</option>
+                                <option value="17">DoF 17 - MCP Abduzione/Adduzione</option>
+                                <option value="18">DoF 18 - PIP Flessione/Estensione</option>
+                                <option value="19">DoF 19 - DIP Flessione/Estensione</option>
+                            </optgroup>
+                            <optgroup label="Mignolo (Pinky - DoF 20-23)">
+                                <option value="20">DoF 20 - MCP Flessione/Estensione</option>
+                                <option value="21">DoF 21 - MCP Abduzione/Adduzione</option>
+                                <option value="22">DoF 22 - PIP Flessione/Estensione</option>
+                                <option value="23">DoF 23 - DIP Flessione/Estensione</option>
+                            </optgroup>
+                        </select>
+                    </div>
+                    
+                    <div class="chart-container">
+                        <!-- Alert when no data loaded -->
+                        <div id="chart-placeholder" class="placeholder-visualizer">
+                            <i data-lucide="line-chart"></i>
+                            <h3>Grafico Temporale Sincronizzato</h3>
+                            <p>I segnali cinematici reali e predetti verranno mostrati qui. Spostando il cursore temporale della mano 3D, potrai analizzare i lag e crosstalk dinamici.</p>
+                        </div>
+                        <canvas id="trajectory-chart" style="display: none;"></canvas>
+                    </div>
+                </div>
+                
+            </div>
+            
+        </section>
+        
+        <!-- Tab Content 2: Architecture -->
+        <section id="content-architecture" class="tab-content main-content">
+            
+            <div class="doc-container">
+                
+                <!-- Documentation steps flow -->
+                <div class="doc-flow">
+                    <div class="glass-card step-card">
+                        <div class="step-icon">
+                            <i data-lucide="activity"></i>
+                        </div>
+                        <div>
+                            <span class="step-badge">ACQUISIZIONE SENSORIALE</span>
+                            <h3>1. Acquisizione HD-EMG Mioelettrica</h3>
+                            <p>Il segnale bioelettrico dell'avambraccio viene acquisito tramite il dispositivo a media-alta densità <strong>OTBioelettronica Sessantaquattro</strong> su 32 canali attivi ad una frequenza di campionamento di <strong>2000 Hz</strong>. Questo consente di mappare in tempo reale le sinergie muscolari fini dei flessori ed estensori delle dita.</p>
+                        </div>
+                    </div>
+                    
+                    <div class="glass-card step-card">
+                        <div class="step-icon">
+                            <i data-lucide="sliders"></i>
+                        </div>
+                        <div>
+                            <span class="step-badge">SIGNAL PROCESSING</span>
+                            <h3>2. Filtraggio Digitale Temporale & RMS</h3>
+                            <p>Ogni canale EMG subisce rimozione dell'offset DC, filtraggio IIR passa-banda <strong>20-450 Hz</strong> (SOS a 4° ordine) e una cascata di filtri Notch a <strong>50, 100, 150 Hz</strong> per azzerare il rumore della rete elettrica. La forza di contrazione viene decodificata tramite una finestra RMS scorrevole da <strong>100ms con step di 12.5ms</strong>, decimando la frequenza a <strong>80 Hz</strong>.</p>
+                        </div>
+                    </div>
+                    
+                    <div class="glass-card step-card">
+                        <div class="step-icon">
+                            <i data-lucide="video"></i>
+                        </div>
+                        <div>
+                            <span class="step-badge">COMPUTER VISION</span>
+                            <h3>3. Webcam Hand Tracking (Google MediaPipe)</h3>
+                            <p>In modo asincrono, una webcam acquisisce il feed video a circa <strong>30 Hz con framerate variabile</strong>. I modelli di deep learning predittivi di Google MediaPipe tracciano nello spazio 3D la topologia metrica della mano, estraendo le coordinate spaziali dei <strong>21 landmark anatomici</strong>.</p>
+                        </div>
+                    </div>
+                    
+                    <div class="glass-card step-card">
+                        <div class="step-icon">
+                            <i data-lucide="bone"></i>
+                        </div>
+                        <div>
+                            <span class="step-badge">BIOMECHANICAL SOLVER</span>
+                            <h3>4. Cinematica Inversa Rigida (IKA)</h3>
+                            <p>Per tradurre i 21 landmark metrici in dati biomeccanici puri, le coordinate passano attraverso un solutore di <strong>Cinematica Inversa (IKA)</strong> basato su ottimizzazione robotica Jacobiana (Damped Least Squares). Lo scheletro viene vincolato rigidamente in base ad un'auto-calibrazione anatomica (`hand_calibration.pt`) e proiettato su **24 gradi di libertà (DoFs)** con rigidi limiti fisiologici del Range of Motion (RoM).</p>
+                        </div>
+                    </div>
+                    
+                    <div class="glass-card step-card">
+                        <div class="step-icon">
+                            <i data-lucide="brain-circuit"></i>
+                        </div>
+                        <div>
+                            <span class="step-badge">DEEP LEARNING MODEL</span>
+                            <h3>5. Rete Neurale Ricorsiva RPC-Net</h3>
+                            <p>Il modello neurale a regressione proporzionale continua converte le contrazioni mioelettriche in traiettorie articolari. La rete si compone di 24 sub-network indipendenti (uno per DoF) a due rami: il <strong>ramo EMG</strong> processa una finestra storica di 0.78s (sottocampione 1:4, 512 input), mentre il <strong>ramo Angoli</strong> memorizza lo stato cinematico precedente (sottocampione 1:8, 192 input), creando un loop ricorsivo causale.</p>
+                        </div>
+                    </div>
+                    
+                    <div class="glass-card step-card">
+                        <div class="step-icon">
+                            <i data-lucide="settings"></i>
+                        </div>
+                        <div>
+                            <span class="step-badge">POST-PROCESSING</span>
+                            <h3>6. Smoothing Butterworth & Forward Kinematics (FK)</h3>
+                            <p>Per azzerare il tremolio residuo delle predizioni, i 24 angoli prodotti passano in un <strong>filtro ricorsivo passa-basso Butterworth di 4° ordine</strong> con taglio a <strong>1 Hz</strong>. Gli angoli stabilizzati passano infine in un modulo di <strong>Forward Kinematics (FK)</strong> per essere ritradotti nelle coordinate 3D dei landmark metrici.</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Documentation Sidebar -->
+                <div class="doc-sidebar">
+                    <!-- Developers card -->
+                    <div class="glass-card author-card">
+                        <div class="avatar">NP</div>
+                        <h4>Progetto Neural Prostheses</h4>
+                        <p style="color: var(--accent-cyan); font-weight: 500;">Scuola Superiore Sant'Anna</p>
+                        
+                        <div class="author-list">
+                            <div class="author-list-item"><i data-lucide="user"></i> Michele Ivo Galella</div>
+                            <div class="author-list-item"><i data-lucide="user"></i> Andrea Filippelli</div>
+                            <div class="author-list-item"><i data-lucide="user"></i> Simona Frascella</div>
+                        </div>
+                        
+                        <p style="font-size: 0.65rem; color: var(--text-secondary); margin-top: 4px;">
+                            Supervisor: Prof. S. Micera, Dr. E. Losanno, Dr. V. Mendez<br>
+                            PhD Co-supervisor: F. I. Serdana
+                        </p>
+                    </div>
+                    
+                    <!-- Dashboard Instructions -->
+                    <div class="glass-card instructions-card">
+                        <h4><i data-lucide="help-circle"></i> Come testare la Dashboard</h4>
+                        <ol>
+                            <li>Apri la cartella <strong>`recordings/`</strong> del progetto.</li>
+                            <li>Trascina il file dei landmarks originale, es. <strong>`trial_6_Kinematics.csv`</strong>, in <strong>GT Landmarks</strong>, e l'inferenza <strong>`trial_6_predicted_kinematics_lms.csv`</strong> in <strong>Pred Landmarks</strong>.</li>
+                            <li>Carica i file degli angoli, es. <strong>`trial_6_Kinematics_core_IKA_24DoF.csv`</strong> in <strong>GT Angoli (IKA)</strong> e <strong>`trial_6_predicted_kinematics_angles.csv`</strong> in <strong>Pred Angoli (Pred)</strong>.</li>
+                            <li>Il sistema calcolerà istantaneamente le metriche ricalcolandole interamente in tempo reale!</li>
+                        </ol>
+                    </div>
+                </div>
+                
+            </div>
+            
+        </section>
+
+    </main>
+
+    <script>
+        // Initialize lucide icons
+        lucide.createIcons();
+
+        // Application State
+        let activeTab = 'visualizer';
+        let filesData = {
+            trueLms: null,       // parsed landmarks { t: [], lms: [[{x,y,z},...], ...] }
+            predLms: null,       // parsed landmarks { t: [], lms: [[{x,y,z},...], ...] }
+            alignedTrueLms: null,// true landmarks interpolated at prediction timestamps
+            trueAngles: null,    // parsed true angles { t: [], angles: [[DoF_0, ...], ...] }
+            predAngles: null,    // parsed predicted angles { t: [], angles: [[Pred_DoF_0, ...], ...] }
+            alignedTrueAngles: null // true angles interpolated at prediction timestamps
+        };
+        
+        let playInterval = null;
+        let isPlaying = false;
+        let currentFrameIndex = 0;
+        let maxFrames = 0;
+        let q_rest = []; // Dynamic resting biomechanical angles
+        
+        // UI elements
+        const scrubber = document.getElementById('time-scrubber');
+        const playBtn = document.getElementById('btn-play');
+        const playIcon = document.getElementById('play-icon');
+        const timeLabel = document.getElementById('label-time');
+        const dofSelect = document.getElementById('chart-dof-select');
+        const maximizeBtn = document.getElementById('btn-maximize');
+        
+        // Three.js Global Variables
+        let scene, camera, renderer, controls;
+        let handTrueGroup, handPredGroup;
+        let handTrueSpheres = [], handPredSpheres = [];
+        let handTrueCylinders = [], handPredCylinders = [];
+        let truePalmMesh, predPalmMesh;
+        let truePalmGeom, predPalmGeom;
+        let isMetric = true;
+        let scaleFactor = 1.0;
+        
+        // Chart.js Variable
+        let trajectoryChart = null;
+
+        // Standard MediaPipe connections
+        const CONNECTIONS = [
+            [0, 1], [1, 2], [2, 3], [3, 4],        // Pollice
+            [0, 5], [5, 6], [6, 7], [7, 8],        // Indice
+            [0, 9], [9, 10], [10, 11], [11, 12],   // Medio
+            [0, 13], [13, 14], [14, 15], [15, 16], // Anulare
+            [0, 17], [17, 18], [18, 19], [19, 20], // Mignolo
+            [5, 9], [9, 13], [13, 17]              // Base del palmo
+        ];
+
+        // Tab Switching
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            
+            if (tabId === 'visualizer') {
+                document.querySelector('[onclick="switchTab(\'visualizer\')"]').classList.add('active');
+                document.getElementById('content-visualizer').classList.add('active');
+                activeTab = 'visualizer';
+                // Trigger resize for ThreeJS
+                if (renderer) {
+                    onWindowResize();
+                }
+            } else {
+                document.querySelector('[onclick="switchTab(\'architecture\')"]').classList.add('active');
+                document.getElementById('content-architecture').classList.add('active');
+                activeTab = 'architecture';
+            }
+        }
+
+        // Fullscreen Toggle on visualizer panel
+        function toggleMaximize() {
+            const panel = document.querySelector('.threejs-panel');
+            panel.classList.toggle('expanded');
+            
+            const maxBtnIcon = maximizeBtn.querySelector('i');
+            if (panel.classList.contains('expanded')) {
+                maxBtnIcon.setAttribute('data-lucide', 'minimize-2');
+            } else {
+                maxBtnIcon.setAttribute('data-lucide', 'maximize-2');
+            }
+            lucide.createIcons();
+            
+            // Trigger resize for ThreeJS
+            setTimeout(onWindowResize, 50);
+            setTimeout(onWindowResize, 150);
+            setTimeout(onWindowResize, 350); // multiple rounds to ensure transition finishes
+        }
+
+        // Drag and Drop Handling
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        // Initialize drag & drop triggers for all 4 slots
+        const slots = ['true-lms', 'true-angles', 'pred-lms', 'pred-angles'];
+        slots.forEach(slot => {
+            const dz = document.getElementById(`dropzone-${slot}`);
+            if (!dz) return;
+            
+            ['dragenter', 'dragover'].forEach(eventName => {
+                dz.addEventListener(eventName, (e) => {
+                    preventDefaults(e);
+                    dz.classList.add('hover');
+                }, false);
+            });
+            
+            ['dragleave', 'drop'].forEach(eventName => {
+                dz.addEventListener(eventName, (e) => {
+                    preventDefaults(e);
+                    dz.classList.remove('hover');
+                }, false);
+            });
+            
+            dz.addEventListener('drop', (e) => {
+                let dt = e.dataTransfer;
+                let files = dt.files;
+                if (files.length) handleFile(files[0], slot);
+            });
+        });
+
+        // Add drag & drop prevent defaults globally
+        window.addEventListener('dragover', preventDefaults, false);
+        window.addEventListener('drop', preventDefaults, false);
+
+        function handleFileSelect(input, slot) {
+            if (input.files.length) handleFile(input.files[0], slot);
+        }
+
+        // General robust CSV Parser
+        function parseCSV(csvText) {
+            const lines = csvText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+            if (lines.length < 2) return null;
+            
+            const headers = lines[0].split(',').map(h => h.trim());
+            const tsIdx = headers.indexOf('Timestamp_LSL');
+            if (tsIdx === -1) return null;
+            
+            // Check if it is a Landmarks file
+            const isLms = headers.includes('LM_0_X');
+            // Check if it is an Angles file
+            const isTrueAngles = headers.includes('DoF_0');
+            const isPredAngles = headers.includes('Pred_DoF_0');
+            
+            if (isLms) {
+                const lmCols = [];
+                for (let i = 0; i < 21; i++) {
+                    lmCols.push({
+                        x: headers.indexOf(`LM_${i}_X`),
+                        y: headers.indexOf(`LM_${i}_Y`),
+                        z: headers.indexOf(`LM_${i}_Z`)
+                    });
+                }
+                if (lmCols.some(c => c.x === -1 || c.y === -1 || c.z === -1)) return null;
+                
+                const t = [];
+                const lms = [];
+                for (let i = 1; i < lines.length; i++) {
+                    const row = lines[i].split(',').map(Number);
+                    if (row.length < headers.length) continue;
+                    
+                    t.push(row[tsIdx]);
+                    const frameLms = [];
+                    for (let lm = 0; lm < 21; lm++) {
+                        frameLms.push({
+                            x: row[lmCols[lm].x],
+                            y: row[lmCols[lm].y],
+                            z: row[lmCols[lm].z]
+                        });
+                    }
+                    lms.push(frameLms);
+                }
+                return { type: 'lms', t, lms };
+            } else if (isTrueAngles || isPredAngles) {
+                const cols = [];
+                const prefix = isPredAngles ? 'Pred_DoF_' : 'DoF_';
+                for (let i = 0; i < 24; i++) {
+                    cols.push(headers.indexOf(`${prefix}${i}`));
+                }
+                if (cols.some(c => c === -1)) return null;
+                
+                const t = [];
+                const angles = [];
+                for (let i = 1; i < lines.length; i++) {
+                    const row = lines[i].split(',').map(Number);
+                    if (row.length < headers.length) continue;
+                    
+                    t.push(row[tsIdx]);
+                    const frameAngles = [];
+                    for (let d = 0; d < 24; d++) {
+                        frameAngles.push(row[cols[d]]);
+                    }
+                    angles.push(frameAngles);
+                }
+                return { type: 'angles', isPred: isPredAngles, t, angles };
+            }
+            
+            return null;
+        }
+
+        // Load files
+        function handleFile(file, slot) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const text = e.target.result;
+                const parsed = parseCSV(text);
+                
+                if (!parsed) {
+                    alert("Errore nel parsing del CSV. Verifica che il file contenga i dati corretti ed i timestamp.");
+                    return;
+                }
+                
+                // Verify parsed type matches slot
+                if (slot.endsWith('lms') && parsed.type !== 'lms') {
+                    alert("Questo file contiene angoli, ma stai cercando di caricarlo nello slot Landmarks!");
+                    return;
+                }
+                if (slot.endsWith('angles') && parsed.type !== 'angles') {
+                    alert("Questo file contiene landmarks, ma stai cercando di caricarlo nello slot Angoli!");
+                    return;
+                }
+                if (slot === 'true-angles' && parsed.isPred) {
+                    alert("Questo è un file di predizioni, ma stai cercando di caricarlo nello slot Ground Truth!");
+                    return;
+                }
+                if (slot === 'pred-angles' && !parsed.isPred) {
+                    alert("Questo è un file Ground Truth, ma stai cercando di caricarlo nello slot Predizioni!");
+                    return;
+                }
+                
+                // Save data
+                if (slot === 'true-lms') {
+                    filesData.trueLms = parsed;
+                } else if (slot === 'true-angles') {
+                    filesData.trueAngles = parsed;
+                } else if (slot === 'pred-lms') {
+                    filesData.predLms = parsed;
+                } else if (slot === 'pred-angles') {
+                    filesData.predAngles = parsed;
+                }
+                
+                // Update UI Dropzone success status
+                const dropzone = document.getElementById(`dropzone-${slot}`);
+                dropzone.classList.add('success');
+                const label = document.getElementById(`label-${slot}`);
+                label.innerText = file.name;
+                label.style.color = 'var(--accent-emerald)';
+                
+                checkAndInitializeEvaluation();
+            };
+            reader.readAsText(file);
+        }
+
+        // Aligning and computing metrics
+        function checkAndInitializeEvaluation() {
+            // We require landmarks for 3D skeleton rendering and basic playback
+            if (filesData.trueLms && filesData.predLms) {
+                // 1. Perform temporal alignment FIRST so data is fully ready!
+                alignTrueLandmarks();
+                calculateDistanceMetrics();
+                
+                // 2. Set up ThreeJS and draw the initial frame
+                if (!scene) {
+                    // Enable visualizer & play controls
+                    maxFrames = filesData.predLms.t.length;
+                    scrubber.max = maxFrames - 1;
+                    scrubber.value = 0;
+                    scrubber.disabled = false;
+                    playBtn.disabled = false;
+                    maximizeBtn.disabled = false;
+                    
+                    initThreeJS();
+                    setFrameIndex(0);
+                } else {
+                    setFrameIndex(0);
+                }
+                
+                // Enable chart options for landmarks
+                dofSelect.disabled = false;
+                initChart();
+            }
+            
+            // If angles are loaded, perform alignment & compute exact MPCC
+            if (filesData.trueAngles && filesData.predAngles) {
+                alignTrueAngles();
+                calculateQRest(); // Calculate dynamic resting angles offsets
+                calculateAngularMetrics();
+                
+                // Enable the chart toggle for Angles
+                document.getElementById('chart-mode-container').style.display = 'flex';
+                initChart();
+            }
+        }
+
+        // 1D Linear Interpolation for Landmarks
+        function alignTrueLandmarks() {
+            const t_true = filesData.trueLms.t;
+            const t_pred = filesData.predLms.t;
+            const lms_true = filesData.trueLms.lms;
+            
+            const alignedLms = [];
+            
+            for (let i = 0; i < t_pred.length; i++) {
+                const tp = t_pred[i];
+                
+                if (tp <= t_true[0]) {
+                    alignedLms.push(JSON.parse(JSON.stringify(lms_true[0])));
+                    continue;
+                }
+                if (tp >= t_true[t_true.length - 1]) {
+                    alignedLms.push(JSON.parse(JSON.stringify(lms_true[lms_true.length - 1])));
+                    continue;
+                }
+                
+                let idx = 0;
+                while (idx < t_true.length - 1 && t_true[idx + 1] < tp) {
+                    idx++;
+                }
+                
+                const t0 = t_true[idx], t1 = t_true[idx + 1];
+                const factor = (tp - t0) / (t1 - t0);
+                
+                const frameLms = [];
+                for (let lm = 0; lm < 21; lm++) {
+                    const p0 = lms_true[idx][lm];
+                    const p1 = lms_true[idx + 1][lm];
+                    
+                    frameLms.push({
+                        x: p0.x + factor * (p1.x - p0.x),
+                        y: p0.y + factor * (p1.y - p0.y),
+                        z: p0.z + factor * (p1.z - p0.z)
+                    });
+                }
+                alignedLms.push(frameLms);
+            }
+            
+            filesData.alignedTrueLms = alignedLms;
+        }
+
+        // 1D Linear Interpolation for Angles
+        function alignTrueAngles() {
+            const t_true = filesData.trueAngles.t;
+            const t_pred = filesData.predAngles.t;
+            const angles_true = filesData.trueAngles.angles;
+            
+            const alignedAngles = [];
+            
+            for (let i = 0; i < t_pred.length; i++) {
+                const tp = t_pred[i];
+                
+                if (tp <= t_true[0]) {
+                    alignedAngles.push([...angles_true[0]]);
+                    continue;
+                }
+                if (tp >= t_true[t_true.length - 1]) {
+                    alignedAngles.push([...angles_true[angles_true.length - 1]]);
+                    continue;
+                }
+                
+                let idx = 0;
+                while (idx < t_true.length - 1 && t_true[idx + 1] < tp) {
+                    idx++;
+                }
+                
+                const t0 = t_true[idx], t1 = t_true[idx + 1];
+                const factor = (tp - t0) / (t1 - t0);
+                
+                const frameAngles = [];
+                for (let d = 0; d < 24; d++) {
+                    const a0 = angles_true[idx][d];
+                    const a1 = angles_true[idx+1][d];
+                    frameAngles.push(a0 + factor * (a1 - a0));
+                }
+                alignedAngles.push(frameAngles);
+            }
+            
+            filesData.alignedTrueAngles = alignedAngles;
+        }
+
+        // Calculate biomechanical resting angles dynamically from the first 64 frames of ground truth
+        function calculateQRest() {
+            if (!filesData.trueAngles) return;
+            const angles = filesData.trueAngles.angles;
+            q_rest = [];
+            for (let d = 0; d < 24; d++) {
+                let sum = 0;
+                const len = Math.min(angles.length, 64);
+                for (let i = 0; i < len; i++) {
+                    sum += angles[i][d];
+                }
+                q_rest.push(sum / len);
+            }
+            console.log("Calculated dynamic q_rest biomechanical offsets:", q_rest);
+        }
+
+        // Dynamic Mean Distance WFD (All 5 fingers)
+        function calculateDistanceMetrics() {
+            const EXCLUDE_SAMPLES = 64;
+            const trueLms = filesData.alignedTrueLms;
+            const predLms = filesData.predLms.lms;
+            
+            if (trueLms.length <= EXCLUDE_SAMPLES) return;
+            
+            const wfd_per_frame = [];
+            const fingertips = [4, 8, 12, 16, 20]; // All 5 fingertips
+            
+            for (let i = EXCLUDE_SAMPLES; i < trueLms.length; i++) {
+                const wrist_true = trueLms[i][0];
+                const wrist_pred = predLms[i][0];
+                
+                let dist_sum = 0;
+                for (let lm of fingertips) {
+                    const p_true = {
+                        x: trueLms[i][lm].x - wrist_true.x,
+                        y: trueLms[i][lm].y - wrist_true.y,
+                        z: trueLms[i][lm].z - wrist_true.z
+                    };
+                    const p_pred = {
+                        x: predLms[i][lm].x - wrist_pred.x,
+                        y: predLms[i][lm].y - wrist_pred.y,
+                        z: predLms[i][lm].z - wrist_pred.z
+                    };
+                    
+                    const dist_meters = Math.sqrt(
+                        Math.pow(p_true.x - p_pred.x, 2) +
+                        Math.pow(p_true.y - p_pred.y, 2) +
+                        Math.pow(p_true.z - p_pred.z, 2)
+                    );
+                    dist_sum += dist_meters * 1000.0;
+                }
+                wfd_per_frame.push(dist_sum / 5.0);
+            }
+            
+            wfd_per_frame.sort((a,b) => a-b);
+            const md = wfd_per_frame.reduce((a,b)=>a+b, 0) / wfd_per_frame.length;
+            const md_med = wfd_per_frame[Math.floor(wfd_per_frame.length * 0.5)];
+            const md_t1 = wfd_per_frame[Math.floor(wfd_per_frame.length * 0.3333)];
+            const md_t2 = wfd_per_frame[Math.floor(wfd_per_frame.length * 0.6667)];
+            
+            document.getElementById('val-md').innerText = `${md.toFixed(2)} mm`;
+            document.getElementById('val-md-med').innerText = `${md_med.toFixed(2)} mm`;
+            document.getElementById('val-md-tert').innerText = `${md_t1.toFixed(1)} / ${md_t2.toFixed(1)} mm`;
+            
+            // Standard Spatial Correlation fallback if Angles CSV not loaded
+            if (!filesData.trueAngles || !filesData.predAngles) {
+                let corrs = [];
+                for (let lm of fingertips) {
+                    for (let axis of ['x', 'y', 'z']) {
+                        let t_val = [], p_val = [];
+                        for (let i = EXCLUDE_SAMPLES; i < trueLms.length; i++) {
+                            t_val.push(trueLms[i][lm][axis] - trueLms[i][0][axis]);
+                            p_val.push(predLms[i][lm][axis] - predLms[i][0][axis]);
+                        }
+                        corrs.push(pearsonCorrelation(t_val, p_val));
+                    }
+                }
+                corrs.sort((a,b)=>a-b);
+                const mpcc = corrs.reduce((a,b)=>a+b, 0) / corrs.length;
+                const mpcc_med = corrs[Math.floor(corrs.length * 0.5)];
+                const mpcc_t1 = corrs[Math.floor(corrs.length * 0.3333)];
+                const mpcc_t2 = corrs[Math.floor(corrs.length * 0.6667)];
+                
+                document.getElementById('val-mpcc').innerText = `${(mpcc * 100).toFixed(2)} %`;
+                document.getElementById('val-mpcc-med').innerText = `${(mpcc_med * 100).toFixed(2)} %`;
+                document.getElementById('val-mpcc-tert').innerText = `${(mpcc_t1*100).toFixed(1)} / ${(mpcc_t2*100).toFixed(1)} %`;
+                document.getElementById('mpcc-label').innerHTML = `MPCC (Spaziale Landmark)<br><span style="font-size:0.6rem;color:var(--accent-rose);text-transform:none;">Carica gli Angoli per MPCC IKA scientifico</span>`;
+            }
+        }
+
+        // Dynamic 24 DoFs Angular MPCC (Pearson Correlation)
+        function calculateAngularMetrics() {
+            const EXCLUDE_SAMPLES = 64;
+            const trueAngles = filesData.alignedTrueAngles;
+            const predAngles = filesData.predAngles.angles;
+            
+            if (trueAngles.length <= EXCLUDE_SAMPLES) return;
+            
+            const pcc_values = [];
+            for (let d = 0; d < 24; d++) {
+                const t_val = [];
+                const p_val = [];
+                for (let i = EXCLUDE_SAMPLES; i < trueAngles.length; i++) {
+                    t_val.push(trueAngles[i][d]);
+                    p_val.push(predAngles[i][d]);
+                }
+                
+                const std_t = stdDev(t_val);
+                const std_p = stdDev(p_val);
+                if (std_t > 0 && std_p > 0) {
+                    pcc_values.push(pearsonCorrelation(t_val, p_val));
+                } else {
+                    pcc_values.push(0.0);
+                }
+            }
+            
+            pcc_values.sort((a,b)=>a-b);
+            const mpcc = pcc_values.reduce((a,b)=>a+b, 0) / pcc_values.length;
+            const mpcc_med = pcc_values[Math.floor(pcc_values.length * 0.5)];
+            const mpcc_t1 = pcc_values[Math.floor(pcc_values.length * 0.3333)];
+            const mpcc_t2 = pcc_values[Math.floor(pcc_values.length * 0.6667)];
+            
+            document.getElementById('val-mpcc').innerText = `${(mpcc * 100).toFixed(2)} %`;
+            document.getElementById('val-mpcc-med').innerText = `${(mpcc_med * 100).toFixed(2)} %`;
+            document.getElementById('val-mpcc-tert').innerText = `${(mpcc_t1*100).toFixed(1)} / ${(mpcc_t2*100).toFixed(1)} %`;
+            document.getElementById('mpcc-label').innerHTML = `MPCC (Scientifico IKA)<br><span style="font-size:0.6rem;color:var(--accent-emerald);text-transform:none;">Ricalcolato in tempo reale su 24 DoFs</span>`;
+        }
+        
+        function stdDev(arr) {
+            const mean = arr.reduce((a,b)=>a+b, 0) / arr.length;
+            const variance = arr.reduce((a,b)=>a+Math.pow(b-mean, 2), 0) / arr.length;
+            return Math.sqrt(variance);
+        }
+
+        function pearsonCorrelation(x, y) {
+            let n = x.length;
+            let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0, sumY2 = 0;
+            for (let i = 0; i < n; i++) {
+                sumX += x[i];
+                sumY += y[i];
+                sumXY += x[i] * y[i];
+                sumX2 += x[i] * x[i];
+                sumY2 += y[i] * y[i];
+            }
+            let num = n * sumXY - sumX * sumY;
+            let den = Math.sqrt((n * sumX2 - sumX * sumX) * (n * sumY2 - sumY * sumY));
+            if (den === 0) return 0;
+            return num / den;
+        }
+
+        // Three.js Hand Skeleton Rendering
+        function initThreeJS() {
+            const container = document.getElementById('threejs-container');
+            const placeholder = document.getElementById('threejs-placeholder');
+            if (placeholder) placeholder.style.display = 'none';
+            const legend = document.getElementById('threejs-legend');
+            if (legend) legend.style.display = 'flex';
+            
+            // Remove existing canvas if any
+            const prevCanvas = container.querySelector('canvas');
+            if (prevCanvas) prevCanvas.remove();
+            
+            // Setup scene, camera & WebGL renderer
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x040813, 0.05);
+            
+            camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.01, 1000);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+            
+            // Controls
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            
+            // Lights
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.55);
+            scene.add(ambientLight);
+            
+            const dirLight1 = new THREE.DirectionalLight(0x22d3ee, 0.95);
+            dirLight1.position.set(5, 5, 5);
+            scene.add(dirLight1);
+            
+            const dirLight2 = new THREE.DirectionalLight(0x6366f1, 0.7);
+            dirLight2.position.set(-5, -5, 5);
+            scene.add(dirLight2);
+            
+            // Detect coordinates system (metric vs pixels)
+            detectCoordFormat();
+            
+            // Futuristic Grid Helper on Floor to anchor hand model
+            let gridHelper = new THREE.GridHelper(isMetric ? 0.4 : 400, 20, 0x6366f1, 0x111827);
+            gridHelper.position.y = isMetric ? -0.07 : -80;
+            scene.add(gridHelper);
+            
+            // Set Camera position based on coordinate format
+            if (isMetric) {
+                camera.position.set(0.12, 0.1, 0.28);
+                controls.target.set(0.12, 0, 0);
+            } else {
+                camera.position.set(150, 100, 400);
+                controls.target.set(150, 0, 0);
+            }
+            controls.update();
+            
+            // Create Groups for Hand meshes
+            handTrueGroup = new THREE.Group();
+            handPredGroup = new THREE.Group();
+            scene.add(handTrueGroup);
+            scene.add(handPredGroup);
+            
+            // Setup meshes (Spheres and Volumetric Bones)
+            createHandMeshes();
+            
+            // Robust automatic resizing using ResizeObserver on the container
+            const resizeObserver = new ResizeObserver(() => {
+                onWindowResize();
+            });
+            resizeObserver.observe(container);
+            
+            // Start Render Loop
+            animateThreeJS();
+        }
+
+        function detectCoordFormat() {
+            // Check average distance of knuckle to wrist
+            const sample = filesData.predLms.lms[0];
+            const dx = sample[9].x - sample[0].x;
+            const dy = sample[9].y - sample[0].y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            
+            isMetric = dist < 1.0;
+            scaleFactor = 1.0;
+            console.log("Coordinate format detected: ", isMetric ? "METRES (Webcam Metric)" : "PIXELS");
+        }
+
+        function createHandMeshes() {
+            // 🦾 Premium Cybernetic Metallic Hand Joint materials
+            const trueJointMat = new THREE.MeshStandardMaterial({
+                color: 0x00ffaa, 
+                roughness: 0.1,
+                metalness: 0.9,
+                emissive: 0x00ffaa,
+                emissiveIntensity: 0.7
+            });
+            const trueBoneMat = new THREE.MeshStandardMaterial({
+                color: 0x34d399,
+                roughness: 0.4,
+                metalness: 0.4,
+                transparent: true,
+                opacity: 0.50,
+                emissive: 0x34d399,
+                emissiveIntensity: 0.05
+            });
+            
+            const predJointMat = new THREE.MeshStandardMaterial({
+                color: 0xff0066, 
+                roughness: 0.1,
+                metalness: 0.9,
+                emissive: 0xff0066,
+                emissiveIntensity: 0.7
+            });
+            const predBoneMat = new THREE.MeshStandardMaterial({
+                color: 0xfb7185,
+                roughness: 0.4,
+                metalness: 0.4,
+                transparent: true,
+                opacity: 0.50,
+                emissive: 0xfb7185,
+                emissiveIntensity: 0.05
+            });
+            
+            // Refined joint node sizes (making them slightly smaller and elegant)
+            const r_joint = isMetric ? 0.0044 : 7.2;
+            const r_tip = isMetric ? 0.0030 : 5.0;
+            const r_wrist = isMetric ? 0.0068 : 11.0;
+            
+            // 1. Create Volumetric Joint Spheres
+            for (let i = 0; i < 21; i++) {
+                let r = r_joint;
+                if (i === 0) r = r_wrist;
+                else if ([4, 8, 12, 16, 20].includes(i)) r = r_tip;
+                
+                const sphereGeom = new THREE.SphereGeometry(r, 20, 20);
+                
+                const meshTrue = new THREE.Mesh(sphereGeom, trueJointMat);
+                const meshPred = new THREE.Mesh(sphereGeom, predJointMat);
+                
+                handTrueGroup.add(meshTrue);
+                handPredGroup.add(meshPred);
+                
+                handTrueSpheres.push(meshTrue);
+                handPredSpheres.push(meshPred);
+            }
+            
+            // 2. Create Volumetric Cylindrical Bones (Thinner)
+            const r_bone = isMetric ? 0.0016 : 2.5;
+            const cylinderGeom = new THREE.CylinderGeometry(r_bone, r_bone, 1.0, 10);
+            
+            for (let conn of CONNECTIONS) {
+                const cylTrue = new THREE.Mesh(cylinderGeom, trueBoneMat);
+                const cylPred = new THREE.Mesh(cylinderGeom, predBoneMat);
+                
+                handTrueGroup.add(cylTrue);
+                handPredGroup.add(cylPred);
+                
+                handTrueCylinders.push({ mesh: cylTrue, u: conn[0], v: conn[1] });
+                handPredCylinders.push({ mesh: cylPred, u: conn[0], v: conn[1] });
+            }
+            
+            // 3. Create semi-transparent palm meshes (0-5-9, 0-9-13, 0-13-17) - Beautifully colored as in matplotlib script!
+            truePalmGeom = new THREE.BufferGeometry();
+            predPalmGeom = new THREE.BufferGeometry();
+            
+            // Set initial position attributes to compile shaders correctly and avoid null geometry errors
+            truePalmGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(15), 3));
+            predPalmGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(15), 3));
+            
+            const indices = new Uint16Array([
+                0, 1, 2,  // 0 -> 5 -> 9
+                0, 2, 3,  // 0 -> 9 -> 13
+                0, 3, 4   // 0 -> 13 -> 17
+            ]);
+            truePalmGeom.setIndex(new THREE.BufferAttribute(indices, 1));
+            predPalmGeom.setIndex(new THREE.BufferAttribute(indices, 1));
+            
+            truePalmMesh = new THREE.Mesh(truePalmGeom, new THREE.MeshStandardMaterial({
+                color: 0x00ff88,
+                emissive: 0x00ff88,
+                emissiveIntensity: 0.25,
+                roughness: 0.5,
+                metalness: 0.2,
+                transparent: true,
+                opacity: 0.26,
+                side: THREE.DoubleSide
+            }));
+            
+            predPalmMesh = new THREE.Mesh(predPalmGeom, new THREE.MeshStandardMaterial({
+                color: 0xff0066,
+                emissive: 0xff0066,
+                emissiveIntensity: 0.25,
+                roughness: 0.5,
+                metalness: 0.2,
+                transparent: true,
+                opacity: 0.26,
+                side: THREE.DoubleSide
+            }));
+            
+            handTrueGroup.add(truePalmMesh);
+            handPredGroup.add(predPalmMesh);
+            
+            // Spacer predicted hand horizontally with a 25 cm offset to avoid overlap completely (matching matplotlib)
+            const offsetWidth = isMetric ? 0.25 : 250;
+            handPredGroup.position.x = offsetWidth;
+        }
+
+        // Volumetric cylinder vector alignment update helper
+        function updateCylinderMesh(cylinderMesh, posU, posV) {
+            const dir = new THREE.Vector3().subVectors(posV, posU);
+            const length = dir.length();
+            
+            // Position at midpoint
+            const midpoint = new THREE.Vector3().addVectors(posU, posV).multiplyScalar(0.5);
+            cylinderMesh.position.copy(midpoint);
+            
+            // Scale height along the Y axis
+            cylinderMesh.scale.set(1, length, 1);
+            
+            // Align cylinder vertical axis to the direction vector
+            const up = new THREE.Vector3(0, 1, 0);
+            dir.normalize();
+            cylinderMesh.quaternion.setFromUnitVectors(up, dir);
+        }
+
+        function onWindowResize() {
+            if (!camera || !renderer) return;
+            const container = document.getElementById('threejs-container');
+            if (!container) return;
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        }
+
+        function animateThreeJS() {
+            if (!renderer) return;
+            requestAnimationFrame(animateThreeJS);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        // Draw current hand frame in WebGL
+        function drawHandFrame(idx) {
+            if (!scene || !filesData.predLms || !filesData.alignedTrueLms) return;
+            
+            const frameTrue = filesData.alignedTrueLms[idx];
+            const framePred = filesData.predLms.lms[idx];
+            
+            if (!frameTrue || !framePred) return;
+            
+            // Polsi
+            const wrist_t = frameTrue[0];
+            const wrist_p = framePred[0];
+            
+            // Draw True joints
+            for (let i = 0; i < 21; i++) {
+                const pt = frameTrue[i];
+                handTrueSpheres[i].position.set(
+                    (pt.x - wrist_t.x) * scaleFactor,
+                    -(pt.y - wrist_t.y) * scaleFactor, // Invert Y axis for natural anatomics
+                    -(pt.z - wrist_t.z) * scaleFactor
+                );
+            }
+            
+            // Draw Pred joints
+            for (let i = 0; i < 21; i++) {
+                const pp = framePred[i];
+                handPredSpheres[i].position.set(
+                    (pp.x - wrist_p.x) * scaleFactor,
+                    -(pp.y - wrist_p.y) * scaleFactor,
+                    -(pp.z - wrist_p.z) * scaleFactor
+                );
+            }
+            
+            // Update True Cylindrical Bones
+            for (let item of handTrueCylinders) {
+                const posU = handTrueSpheres[item.u].position;
+                const posV = handTrueSpheres[item.v].position;
+                updateCylinderMesh(item.mesh, posU, posV);
+            }
+            
+            // Update Pred Cylindrical Bones
+            for (let item of handPredCylinders) {
+                const posU = handPredSpheres[item.u].position;
+                const posV = handPredSpheres[item.v].position;
+                updateCylinderMesh(item.mesh, posU, posV);
+            }
+            
+            // Update Palms
+            const palmIndices = [0, 5, 9, 13, 17];
+            const verticesTrue = new Float32Array(15);
+            const verticesPred = new Float32Array(15);
+            
+            for (let k = 0; k < 5; k++) {
+                const posT = handTrueSpheres[palmIndices[k]].position;
+                verticesTrue[k*3] = posT.x;
+                verticesTrue[k*3+1] = posT.y;
+                verticesTrue[k*3+2] = posT.z;
+                
+                const posP = handPredSpheres[palmIndices[k]].position;
+                verticesPred[k*3] = posP.x;
+                verticesPred[k*3+1] = posP.y;
+                verticesPred[k*3+2] = posP.z;
+            }
+            
+            truePalmGeom.setAttribute('position', new THREE.BufferAttribute(verticesTrue, 3));
+            truePalmGeom.computeVertexNormals();
+            truePalmGeom.computeBoundingBox();
+            truePalmGeom.computeBoundingSphere();
+            truePalmGeom.attributes.position.needsUpdate = true;
+            
+            predPalmGeom.setAttribute('position', new THREE.BufferAttribute(verticesPred, 3));
+            predPalmGeom.computeVertexNormals();
+            predPalmGeom.computeBoundingBox();
+            predPalmGeom.computeBoundingSphere();
+            predPalmGeom.attributes.position.needsUpdate = true;
+        }
+
+        // Scrubber / Player Controls
+        function setFrameIndex(idx) {
+            currentFrameIndex = idx;
+            scrubber.value = idx;
+            
+            const t = filesData.predLms.t[idx];
+            const startT = filesData.predLms.t[0];
+            const duration = t - startT;
+            timeLabel.innerText = `${duration.toFixed(2)} s`;
+            
+            // Update 3D Hand
+            drawHandFrame(idx);
+            
+            // Update Chart Indicator
+            updateChartIndicator(idx);
+        }
+
+        scrubber.addEventListener('input', (e) => {
+            if (playInterval) togglePlay();
+            setFrameIndex(parseInt(e.target.value));
+        });
+
+        playBtn.addEventListener('click', togglePlay);
+
+        function togglePlay() {
+            isPlaying = !isPlaying;
+            if (isPlaying) {
+                playIcon.setAttribute('data-lucide', 'pause');
+                lucide.createIcons();
+                playBtn.style.background = 'var(--accent-rose)';
+                
+                playInterval = setInterval(() => {
+                    let nextFrame = (currentFrameIndex + 1) % maxFrames;
+                    setFrameIndex(nextFrame);
+                }, 1000 / 80.0); // 80 Hz playback rate
+            } else {
+                playIcon.setAttribute('data-lucide', 'play');
+                lucide.createIcons();
+                playBtn.style.background = 'var(--accent-indigo)';
+                
+                clearInterval(playInterval);
+                playInterval = null;
+            }
+        }
+
+        // Switch Chart Type (Landmarks vs Angles vs prediction Error)
+        function switchChartMode() {
+            const mode = document.getElementById('chart-mode-select').value;
+            const dofSelect = document.getElementById('chart-dof-select');
+            const angleSelect = document.getElementById('chart-angle-select');
+            
+            if (mode === 'lms') {
+                dofSelect.style.display = 'block';
+                angleSelect.style.display = 'none';
+            } else {
+                dofSelect.style.display = 'none';
+                angleSelect.style.display = 'block';
+            }
+            initChart();
+        }
+
+        // Synchronized Trajectory Charts using Chart.js
+        function initChart() {
+            const container = document.getElementById('trajectory-chart');
+            const placeholder = document.getElementById('chart-placeholder');
+            if (placeholder) placeholder.style.display = 'none';
+            container.style.display = 'block';
+            
+            const mode = document.getElementById('chart-mode-select')?.value || 'lms';
+            const selectVal = dofSelect.value;
+            
+            const dataSets = extractChartData();
+            
+            const startT = filesData.predLms.t[0];
+            const labels = filesData.predLms.t.map(t => (t - startT).toFixed(2));
+            
+            if (trajectoryChart) {
+                trajectoryChart.destroy();
+            }
+            
+            let label1 = 'Reale (Ground Truth)';
+            let label2 = 'Predetto (RPC-Net)';
+            let yTitle = 'Coordinate (Metri)';
+            let color1 = '#10b981'; // Green
+            let color2 = '#f43f5e'; // Pink
+            let borderDash = [5, 4];
+            
+            if (mode === 'lms') {
+                yTitle = selectVal.startsWith('wfd') ? 'Estensione Dita (mm)' : 'Coordinate (Metri)';
+            } else if (mode === 'angles') {
+                label1 = 'Reale (IKA)';
+                label2 = 'Predetto (RPC-Net)';
+                yTitle = 'Angolo (Gradi)';
+            } else if (mode === 'error') {
+                label1 = 'Riferimento (Errore Zero)';
+                label2 = 'Errore RPC-Net';
+                yTitle = 'Errore Assoluto (Gradi)';
+                color1 = 'rgba(255, 255, 255, 0.15)'; // faint line
+                color2 = '#f59e0b'; // amber
+                borderDash = []; // solid error line
+            }
+            
+            const ctx = container.getContext('2d');
+            trajectoryChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: label1,
+                            data: dataSets.trueVal,
+                            borderColor: color1,
+                            borderWidth: mode === 'error' ? 1.5 : 2.2,
+                            pointRadius: 0,
+                            fill: false,
+                            tension: 0.1
+                        },
+                        {
+                            label: label2,
+                            data: dataSets.predVal,
+                            borderColor: color2,
+                            borderWidth: 2,
+                            borderDash: borderDash,
+                            pointRadius: 0,
+                            fill: false,
+                            tension: 0.1
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: { duration: 0 }, // fast updates
+                    plugins: {
+                        legend: {
+                            labels: { color: '#94a3b8', font: { family: 'Inter', size: 10 } }
+                        },
+                        tooltip: { enabled: false }
+                    },
+                    scales: {
+                        x: {
+                            grid: { color: 'rgba(255, 255, 255, 0.02)' },
+                            ticks: { color: '#64748b', maxTicksLimit: 12, font: { size: 9 } }
+                        },
+                        y: {
+                            grid: { color: 'rgba(255, 255, 255, 0.03)' },
+                            ticks: { color: '#64748b', font: { size: 9 } },
+                            title: {
+                                display: true,
+                                text: yTitle,
+                                color: '#64748b',
+                                font: { size: 9 }
+                            }
+                        }
+                    }
+                },
+                plugins: [{
+                    // Custom plugin for drawing the synchronized timeline cursor
+                    id: 'verticalLine',
+                    afterDraw: (chart) => {
+                        if (chart.tooltip?._active?.length) return;
+                        const activeIndex = currentFrameIndex;
+                        const ctx = chart.ctx;
+                        const xScale = chart.scales.x;
+                        const yScale = chart.scales.y;
+                        
+                        const x = xScale.getPixelForValue(activeIndex);
+                        const topY = yScale.top;
+                        const bottomY = yScale.bottom;
+                        
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.moveTo(x, topY);
+                        ctx.lineTo(x, bottomY);
+                        ctx.lineWidth = 1.5;
+                        ctx.strokeStyle = 'rgba(6, 182, 212, 0.7)';
+                        ctx.setLineDash([4, 3]);
+                        ctx.stroke();
+                        ctx.restore();
+                    }
+                }]
+            });
+        }
+
+        function updateChartIndicator(idx) {
+            if (trajectoryChart) {
+                trajectoryChart.draw(); // re-draw draws the timeline line
+            }
+        }
+
+        // Multi-mode chart data extractor
+        function extractChartData() {
+            const mode = document.getElementById('chart-mode-select')?.value || 'lms';
+            const trueVal = [];
+            const predVal = [];
+            
+            if (mode === 'lms') {
+                const metricType = dofSelect.value;
+                const predLms = filesData.predLms.lms;
+                const trueLms = filesData.alignedTrueLms;
+                
+                if (metricType.startsWith('wfd_') || metricType === 'wfd_mean') {
+                    const fingertips = {
+                        'wfd_thumb': 4,
+                        'wfd_index': 8,
+                        'wfd_middle': 12,
+                        'wfd_ring': 16,
+                        'wfd_pinky': 20
+                    };
+                    
+                    for (let i = 0; i < predLms.length; i++) {
+                        const wt = trueLms[i][0];
+                        const wp = predLms[i][0];
+                        
+                        if (metricType === 'wfd_mean') {
+                            let sumTrue = 0, sumPred = 0;
+                            // All 5 fingertips
+                            for (let lm of [4, 8, 12, 16, 20]) {
+                                const dt = Math.sqrt(
+                                    Math.pow(trueLms[i][lm].x - wt.x, 2) +
+                                    Math.pow(trueLms[i][lm].y - wt.y, 2) +
+                                    Math.pow(trueLms[i][lm].z - wt.z, 2)
+                                );
+                                const dp = Math.sqrt(
+                                    Math.pow(predLms[i][lm].x - wp.x, 2) +
+                                    Math.pow(predLms[i][lm].y - wp.y, 2) +
+                                    Math.pow(predLms[i][lm].z - wp.z, 2)
+                                );
+                                sumTrue += dt * 1000.0;
+                                sumPred += dp * 1000.0;
+                            }
+                            trueVal.push(sumTrue / 5.0);
+                            predVal.push(sumPred / 5.0);
+                        } else {
+                            const lm = fingertips[metricType];
+                            const dt = Math.sqrt(
+                                Math.pow(trueLms[i][lm].x - wt.x, 2) +
+                                Math.pow(trueLms[i][lm].y - wt.y, 2) +
+                                Math.pow(trueLms[i][lm].z - wt.z, 2)
+                            );
+                            const dp = Math.sqrt(
+                                Math.pow(predLms[i][lm].x - wp.x, 2) +
+                                Math.pow(predLms[i][lm].y - wp.y, 2) +
+                                Math.pow(predLms[i][lm].z - wp.z, 2)
+                            );
+                            trueVal.push(dt * 1000.0);
+                            predVal.push(dp * 1000.0);
+                        }
+                    }
+                } else {
+                    // Coordinate tracing
+                    const parts = metricType.split('_');
+                    const finger = parts[1]; // thumb, index, middle, ring, pinky
+                    const axis = parts[2].toLowerCase(); // x, y, z
+                    
+                    const fingerMap = {
+                        'thumb': 4,
+                        'index': 8,
+                        'middle': 12,
+                        'ring': 16,
+                        'pinky': 20
+                    };
+                    const lm = fingerMap[finger];
+                    
+                    for (let i = 0; i < predLms.length; i++) {
+                        trueVal.push(trueLms[i][lm][axis] - trueLms[i][0][axis]);
+                        predVal.push(predLms[i][lm][axis] - predLms[i][0][axis]);
+                    }
+                }
+            } else if (mode === 'angles') {
+                const dofIdx = parseInt(document.getElementById('chart-angle-select').value);
+                const trueAngles = filesData.alignedTrueAngles;
+                const predAngles = filesData.predAngles.angles;
+                
+                // Retrieve q_rest offset
+                if (q_rest.length === 0) calculateQRest();
+                const q_r = q_rest[dofIdx] || 0;
+                
+                for (let i = 0; i < predAngles.length; i++) {
+                    trueVal.push(trueAngles[i][dofIdx]);
+                    
+                    // Denormalize predictions from [0, 1] normalized space to absolute biomechanical degrees!
+                    const q_norm = predAngles[i][dofIdx];
+                    const q_deg_centered = (q_norm * 240.0) - 150.0;
+                    const q_deg_absolute = q_deg_centered + q_r;
+                    
+                    predVal.push(q_deg_absolute);
+                }
+            } else if (mode === 'error') {
+                const dofIdx = parseInt(document.getElementById('chart-angle-select').value);
+                const trueAngles = filesData.alignedTrueAngles;
+                const predAngles = filesData.predAngles.angles;
+                
+                // Retrieve q_rest offset
+                if (q_rest.length === 0) calculateQRest();
+                const q_r = q_rest[dofIdx] || 0;
+                
+                for (let i = 0; i < predAngles.length; i++) {
+                    const q_norm = predAngles[i][dofIdx];
+                    const q_deg_centered = (q_norm * 240.0) - 150.0;
+                    const q_deg_absolute = q_deg_centered + q_r;
+                    
+                    const err = Math.abs(q_deg_absolute - trueAngles[i][dofIdx]);
+                    trueVal.push(0.0); // Baseline at 0
+                    predVal.push(err); // Actual prediction error in absolute degrees
+                }
+            }
+            
+            return { trueVal, predVal };
+        }
+    </script>
+</body>
+</html>

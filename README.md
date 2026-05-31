@@ -64,6 +64,12 @@ Strumento di debug per la diagnostica della cinematica umana rigida, predetta e 
 - **Compensazione Offset Spaziale:** Applica una traslazione forzata, azzerando le coordinate del polso all'origine per tutti i modelli, sovrapponendoli per separazione orizzontale in un'unica griglia isometrica di comparazione visiva.
 - **Animazione Interattiva:** Gestisce polilinee, triangolazioni e nodi sparsi in `matplotlib.animation` sfruttando keyframe temporali per il monitoraggio analitico delle discrepanze o violazioni ROM.
 
+### 9. 🛠️ Strumenti di Calibrazione e Diagnostica (Utility)
+La suite è corredata da script di utility per garantire la robustezza biomeccanica e la validazione della qualità dei segnali:
+- **`check_MP_variance.py`:** Strumento diagnostico che valuta la varianza e l'errore delle lunghezze ossee estratte da MediaPipe. Giustifica la necessità di forzare uno scheletro rigido in fase di pre-processing.
+- **`plot_emg_spectrum.py`:** Analizzatore spettrale offline. Genera grafici comparativi ad alta risoluzione (PSD e Spettrogrammi) per confrontare i segnali EMG raw con quelli filtrati e verificare la correttezza del filtraggio (es. efficacia dei filtri Notch a 50Hz).
+- **`IKA.py` / `core_kin.py`:** Contengono i core matematici per la risoluzione della Cinematica Inversa. Utilizzano ottimizzatori Jacobiani (Damped Least Squares) e vincoli di Range of Motion (ROM) per convertire le stime rumorose in coordinate continue a 24 DoF, rispettando la topologia e i limiti articolari reali della mano.
+
 ---
 
 ## Requisiti e Installazione

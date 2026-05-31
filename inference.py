@@ -195,7 +195,7 @@ if __name__ == "__main__":
     # ---------------------------------------------------------
     # MODIFICA QUI IL NUMERO DEL TRIAL CHE VUOI TESTARE
     # Es. 6, 9, 15 (trial di Test non visti dalla rete)
-    TRIAL_TEST = 6
+    TRIAL_TEST = 15
     # ---------------------------------------------------------
     
     FILE_EMG_RMS = os.path.join(BASE_DIR, "recordings", f"trial_{TRIAL_TEST}_EMG_RMS.csv") 

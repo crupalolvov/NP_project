@@ -371,7 +371,7 @@ class CleanHandFK:
             
             R_base = self.R_splay[f_name]
             
-            R_mcp = R_wrist @ R_base @ Rz(q[q_idx+1]) @ Rx(q[q_idx])
+            R_mcp = R_wrist @ R_base @ Rx(q[q_idx]) @ Rz(q[q_idx+1])
             v_prox = np.array([0, self.anatomy['lengths'][f_name+'_Proximal'], 0])
             LMs[lm_idx[1]] = LMs[lm_idx[0]] + (R_mcp @ v_prox)
             
@@ -388,11 +388,11 @@ class CleanHandFK:
         LMs[1] = R_wrist @ v_meta_t
         R_base_t = self.R_splay['Thumb']
         
-        R_cmc = R_wrist @ R_base_t @ Rz(q[4]) @ Rx(q[3]) 
+        R_cmc = R_wrist @ R_base_t @ Rx(q[3]) @ Rz(q[4]) 
         v_prox_t = np.array([0, self.anatomy['lengths']['Thumb_Proximal'], 0])
         LMs[2] = LMs[1] + (R_cmc @ v_prox_t)
         
-        R_mcp_t = R_cmc @ Rz(q[6]) @ Rx(q[5])
+        R_mcp_t = R_cmc @ Rx(q[5]) @ Rz(q[6])
         v_inter_t = np.array([0, self.anatomy['lengths']['Thumb_Intermediate'], 0])
         LMs[3] = LMs[2] + (R_mcp_t @ v_inter_t)
         
