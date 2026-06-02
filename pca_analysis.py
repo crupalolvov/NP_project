@@ -176,8 +176,8 @@ def generate_postural_synergies_plot(title, true_segments, pred_occurrences, pca
             if len(occurrences_list) > 1:
                 ax.text(centroid_pred[0] + 0.006, centroid_pred[1] - 0.008, f"{idx+1}", color='#333333', fontsize=7.0, fontweight='bold', zorder=5)
                 
-    ax.set_xlabel("Componente Principale 1 (PC1)", fontsize=11, fontweight='500')
-    ax.set_ylabel("Componente Principale 2 (PC2)", fontsize=11, fontweight='500')
+    ax.set_xlabel("PC1", fontsize=11, fontweight='500')
+    ax.set_ylabel("PC2", fontsize=11, fontweight='500')
     ax.set_title(title, fontsize=13, fontweight='bold')
     ax.grid(True, linestyle=':', alpha=0.6)
     
@@ -294,16 +294,16 @@ def run_synergy_analysis():
     
     # 5a. Plot della spiegazione della varianza cumulata
     fig_a, ax_a = plt.subplots(figsize=(7, 5))
-    ax_a.plot(range(1, 12), cum_variance_pct[:11], marker='o', linewidth=2, color='#1f77b4', label='Varianza Cumulata')
-    ax_a.bar(range(1, 12), variance_pct[:11], alpha=0.5, color='#6366f1', label='Varianza Singola')
+    ax_a.plot(range(1, 12), cum_variance_pct[:11], marker='o', linewidth=2, color='#1f77b4', label='Cumulative Variance')
+    ax_a.bar(range(1, 12), variance_pct[:11], alpha=0.5, color='#6366f1', label='Individual Variance')
     
     # Riferimento scientifico cumulata a 2 componenti
     ax_a.axhline(y=cum_variance_pct[1], color='#f43f5e', linestyle='--', alpha=0.8)
-    ax_a.text(5, cum_variance_pct[1]-4, f"2 PC spiegano il {cum_variance_pct[1]:.2f}% dei dati", color='#f43f5e', fontweight='bold', fontsize=9)
+    ax_a.text(5, cum_variance_pct[1]-4, f"2 PC explain {cum_variance_pct[1]:.2f}% of the data", color='#f43f5e', fontweight='bold', fontsize=9)
     
-    ax_a.set_xlabel("Componenti Principali (PCs)", fontsize=10)
-    ax_a.set_ylabel("Varianza Spiegata (%)", fontsize=10)
-    ax_a.set_title("Varianza Spiegata della Cinematica Articolare (Fig. 5a)", fontsize=12, fontweight='bold')
+    ax_a.set_xlabel("Principal Components (PCs)", fontsize=10)
+    ax_a.set_ylabel("Explained Variance (%)", fontsize=10)
+    ax_a.set_title("Explained Variance of Articular Kinematics", fontsize=12, fontweight='bold')
     ax_a.set_xticks(range(1, 12))
     ax_a.grid(True, linestyle=':', alpha=0.5)
     ax_a.legend()
@@ -318,7 +318,7 @@ def run_synergy_analysis():
     # 1. Grafico Combinato (Trial 6 + Trial 9)
     plot_combined_path = os.path.join(eval_dir, "pca_postural_synergies_5b.png")
     generate_postural_synergies_plot(
-        "Analisi Sinergie Articolari nel PC Postural Space (Combined Fig. 5b)",
+        "Articular Synergies in PC Postural Space - Combined Trials",
         true_combined, pred_combined, pca_2d, colors_dict, plot_combined_path
     )
     print(f"   * Grafico Combinato salvato in: eval/pca_postural_synergies_5b.png")
@@ -326,7 +326,7 @@ def run_synergy_analysis():
     # 2. Grafico Singolo per Trial 6
     plot_t6_path = os.path.join(eval_dir, "pca_trial_6_postural_synergies.png")
     generate_postural_synergies_plot(
-        "Analisi Sinergie Articolari nel PC Postural Space - Trial 6",
+        "Articular Synergies in PC Postural Space - Trial 6",
         segmented_true_6, occurrences_pred_6, pca_2d, colors_dict, plot_t6_path
     )
     print(f"   * Grafico Trial 6 salvato in  : eval/pca_trial_6_postural_synergies.png")
@@ -334,7 +334,7 @@ def run_synergy_analysis():
     # 3. Grafico Singolo per Trial 9
     plot_t9_path = os.path.join(eval_dir, "pca_trial_9_postural_synergies.png")
     generate_postural_synergies_plot(
-        "Analisi Sinergie Articolari nel PC Postural Space - Trial 9",
+        "Articular Synergies in PC Postural Space - Trial 9",
         segmented_true_9, occurrences_pred_9, pca_2d, colors_dict, plot_t9_path
     )
     print(f"   * Grafico Trial 9 salvato in  : eval/pca_trial_9_postural_synergies.png")
