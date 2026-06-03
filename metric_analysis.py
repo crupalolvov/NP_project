@@ -51,6 +51,57 @@ def process_predicted_kinematics(csv_path):
     norm_angles = df[pred_cols].values
     return norm_angles, time_kin
 
+# --- 1.1 LANDMARK PROCESSING HELPERS ---
+def process_lms(csv_path):
+    df = pd.read_csv(csv_path)
+    time_kin = df['Timestamp_LSL'].values
+    
+    lm_cols = [f'LM_{i}_{axis}' for i in range(21) for axis in ['X', 'Y', 'Z']]
+    # Cerca di estrarre le colonne LM_... se non presenti usa le 63 colonne che seguono il Timestamp
+    if all(c in df.columns for c in lm_cols):
+        lms = df[lm_cols].values
+    else:
+        lms = df.drop(columns=['Timestamp_LSL']).iloc[:, :63].values
+    return lms, time_kin
+
+def evaluate_lm_metrics(true_lms, time_true, pred_lms, time_pred):
+    # Interpolazione per allineare temporalmente i segnali
+    interpolator = interp1d(time_true, true_lms, axis=0, bounds_error=False, 
+                            fill_value=(true_lms[0], true_lms[-1]))
+    true_lms_interpolated = interpolator(time_pred)
+    
+    EXCLUDE_SAMPLES = 64
+    
+    # Controllo fattore di scala (metri vs millimetri)
+    scale_factor = 1.0 if np.max(np.abs(pred_lms)) > 10.0 else 1000.0
+    
+    y_true = true_lms_interpolated[EXCLUDE_SAMPLES:] * scale_factor
+    y_pred = pred_lms[EXCLUDE_SAMPLES:] * scale_factor
+    
+    # Reshape in matrici 3D (Frames x 21 Landmark x 3 Assi XYZ)
+    y_true_3d = y_true.reshape(-1, 21, 3)
+    y_pred_3d = y_pred.reshape(-1, 21, 3)
+    
+    # Centratura sul Polso (Landmark 0) per isolare la posa intrinseca
+    y_true_centered = y_true_3d - y_true_3d[:, 0:1, :]
+    y_pred_centered = y_pred_3d - y_pred_3d[:, 0:1, :]
+    
+    # Calcolo della distanza euclidea vettoriale (Frame x 21)
+    distances = np.linalg.norm(y_true_centered - y_pred_centered, axis=2)
+    
+    # -----------------------------------------------------------------
+    # MAPPATURA DELLE PUNTE (Fingertips)
+    # 4 = Pollice, 8 = Indice, 12 = Medio, 16 = Anulare, 20 = Mignolo
+    # -----------------------------------------------------------------
+    
+    # 1. WFD (Weighted Fingertip Distance): Errore delle 3 dita funzionali / 3
+    wfd = np.mean(distances[:, [4, 8, 12]])
+    
+    # 2. MFD (Mean Fingertip Distance): Errore di TUTTE le 5 dita / 5
+    mfd = np.mean(distances[:, [4, 8, 12, 16, 20]])
+    
+    return wfd, mfd
+
 # --- 2. METRICS EVALUATION CORE ---
 def evaluate_trial_metrics(true_angles, time_true, pred_angles, time_pred, trial_name):
     """
@@ -107,11 +158,21 @@ def evaluate_trial_metrics(true_angles, time_true, pred_angles, time_pred, trial
     mean_r2 = df_metrics['R^2 Score'].mean()
     mean_rmse = df_metrics['RMSE'].mean()
     
+    # Weighted Fingertip (WF) metrics: esclude Mignolo e Anulare (DoF 0-15)
+    wf_mean_r = df_metrics.loc[:15, 'R (Pearson)'].mean()
+    wf_mean_r2 = df_metrics.loc[:15, 'R^2 Score'].mean()
+    wf_mean_rmse = df_metrics.loc[:15, 'RMSE'].mean()
+
     mean_row = pd.DataFrame([{
         'DoF': 'OVERALL MEAN',
         'R (Pearson)': mean_r,
         'R^2 Score': mean_r2,
         'RMSE': mean_rmse
+    }, {
+        'DoF': 'WF MEAN (Wrist+Thumb+Idx+Mid)',
+        'R (Pearson)': wf_mean_r,
+        'R^2 Score': wf_mean_r2,
+        'RMSE': wf_mean_rmse
     }])
     
     df_metrics_with_mean = pd.concat([df_metrics, mean_row], ignore_index=True)
@@ -122,7 +183,7 @@ def evaluate_trial_metrics(true_angles, time_true, pred_angles, time_pred, trial
     df_formatted['R^2 Score'] = df_formatted['R^2 Score'].apply(lambda x: f"{x:.3f}")
     df_formatted['RMSE'] = df_formatted['RMSE'].apply(lambda x: f"{x*100:.2f}%") # RMSE come percentuale del range
     
-    return df_metrics_with_mean, df_formatted, best_joint_info, worst_joint_info, y_true, y_pred, time_pred[EXCLUDE_SAMPLES:]
+    return df_metrics_with_mean, df_formatted, best_joint_info, worst_joint_info, wf_mean_r, y_true, y_pred, time_pred[EXCLUDE_SAMPLES:]
 
 def plot_kinematic_tracking(y_true, y_pred, time_array, df_metrics, trial_name, trial_labels=None, start_time=None):
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -262,17 +323,32 @@ def run_metrics_analysis():
         norm_true_6, time_true_6 = process_trial_kinematics(true_6_file, labels.get('trial_6', []))
         norm_pred_6, time_pred_6 = process_predicted_kinematics(pred_6_file)
 
-        df_raw_6, df_fmt_6, best_6, worst_6, y_true_6, y_pred_6, time_6 = evaluate_trial_metrics(norm_true_6, time_true_6, norm_pred_6, time_pred_6, "Trial 6")
+        df_raw_6, df_fmt_6, best_6, worst_6, wf_pcc_6, y_true_6, y_pred_6, time_6 = evaluate_trial_metrics(norm_true_6, time_true_6, norm_pred_6, time_pred_6, "Trial 6")
         print(df_fmt_6.to_string(index=False))
         print("\n  --- HIGHLIGHTS (Trial 6) ---")
         print(f"  Miglior Joint (R): {best_6['DoF']} con R = {best_6['R (Pearson)']*100:.2f}%")
         print(f"  Peggior Joint (R): {worst_6['DoF']} con R = {worst_6['R (Pearson)']*100:.2f}%")
+        print(f"  Weighted Fingertip PCC: {wf_pcc_6*100:.2f}%")
         df_raw_6.to_csv(os.path.join(BASE_DIR, "eval", "metrics_trial_6.csv"), index=False)
         
         labels_6 = labels.get('trial_6', [])
         start_t_6 = time_true_6[0]
         plot_kinematic_tracking(y_true_6, y_pred_6, time_6, df_raw_6, "trial_6", trial_labels=labels_6, start_time=start_t_6)
         plot_overall_error(y_true_6, y_pred_6, time_6, "trial_6", trial_labels=labels_6, start_time=start_t_6)
+
+    # Analisi LMs Trial 6
+    true_6_lm_file = os.path.join(BASE_DIR, "recordings", "trial_6_Kinematics_preprocessed.csv")
+    if not os.path.exists(true_6_lm_file):
+        true_6_lm_file = os.path.join(BASE_DIR, "trial_6_Kinematics_preprocessed.csv")
+    pred_6_lm_file = os.path.join(BASE_DIR, "trial_6_predicted_kinematics_lms.csv")
+    
+    if os.path.exists(true_6_lm_file) and os.path.exists(pred_6_lm_file):
+        print("\n  --- DISTANZE LANDMARKS (Trial 6) ---")
+        true_lms_6, time_true_lm_6 = process_lms(true_6_lm_file)
+        pred_lms_6, time_pred_lm_6 = process_lms(pred_6_lm_file)
+        wfd_6, gmd_6 = evaluate_lm_metrics(true_lms_6, time_true_lm_6, pred_lms_6, time_pred_lm_6)
+        print(f"  Weighted Fingertip Distance (Pollice, Indice, Medio): {wfd_6:.2f} mm")
+        print(f"  Global Mean Distance: {gmd_6:.2f} mm")
 
     # Analisi Trial 9
     true_9_file = os.path.join(BASE_DIR, "recordings", "trial_9_Kinematics_core_IKA_24DoF.csv")
@@ -283,11 +359,12 @@ def run_metrics_analysis():
         norm_true_9, time_true_9 = process_trial_kinematics(true_9_file, labels.get('trial_9', []))
         norm_pred_9, time_pred_9 = process_predicted_kinematics(pred_9_file)
 
-        df_raw_9, df_fmt_9, best_9, worst_9, y_true_9, y_pred_9, time_9 = evaluate_trial_metrics(norm_true_9, time_true_9, norm_pred_9, time_pred_9, "Trial 9")
+        df_raw_9, df_fmt_9, best_9, worst_9, wf_pcc_9, y_true_9, y_pred_9, time_9 = evaluate_trial_metrics(norm_true_9, time_true_9, norm_pred_9, time_pred_9, "Trial 9")
         print(df_fmt_9.to_string(index=False))
         print("\n  --- HIGHLIGHTS (Trial 9) ---")
         print(f"  Miglior Joint (R): {best_9['DoF']} con R = {best_9['R (Pearson)']*100:.2f}%")
         print(f"  Peggior Joint (R): {worst_9['DoF']} con R = {worst_9['R (Pearson)']*100:.2f}%")
+        print(f"  Weighted Fingertip PCC: {wf_pcc_9*100:.2f}%")
         df_raw_9.to_csv(os.path.join(BASE_DIR, "eval", "metrics_trial_9.csv"), index=False)
         
         labels_9 = labels.get('trial_9', [])
@@ -295,6 +372,20 @@ def run_metrics_analysis():
         plot_kinematic_tracking(y_true_9, y_pred_9, time_9, df_raw_9, "trial_9", trial_labels=labels_9, start_time=start_t_9)
         plot_overall_error(y_true_9, y_pred_9, time_9, "trial_9", trial_labels=labels_9, start_time=start_t_9)
         
+    # Analisi LMs Trial 9
+    true_9_lm_file = os.path.join(BASE_DIR, "recordings", "trial_9_Kinematics_preprocessed.csv")
+    if not os.path.exists(true_9_lm_file):
+        true_9_lm_file = os.path.join(BASE_DIR, "trial_9_Kinematics_preprocessed.csv")
+    pred_9_lm_file = os.path.join(BASE_DIR, "trial_9_predicted_kinematics_lms.csv")
+    
+    if os.path.exists(true_9_lm_file) and os.path.exists(pred_9_lm_file):
+        print("\n  --- DISTANZE LANDMARKS (Trial 9) ---")
+        true_lms_9, time_true_lm_9 = process_lms(true_9_lm_file)
+        pred_lms_9, time_pred_lm_9 = process_lms(pred_9_lm_file)
+        wfd_9, gmd_9 = evaluate_lm_metrics(true_lms_9, time_true_lm_9, pred_lms_9, time_pred_lm_9)
+        print(f"  Weighted Fingertip Distance (Pollice, Indice, Medio): {wfd_9:.2f} mm")
+        print(f"  Global Mean Distance: {gmd_9:.2f} mm")
+
     print("\nFile CSV esportati con successo nella cartella 'eval/'")
     print("="*70)
 
