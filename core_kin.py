@@ -657,53 +657,82 @@ if __name__ == "__main__":
         torch.save(anatomy, CALIB_FILE)
         print(f"Calibrazione anatomica salvata in: {os.path.basename(CALIB_FILE)}")
     
-    # 2. PULIZIA TOTALE: passiamo il CSV e riceviamo un array perfetto in pixel
-    cleaned_landmarks_array = preprocess_mediapipe_data(KIN_FILE, anatomy)
     df_orig = pd.read_csv(KIN_FILE)
-    
-    fk = CleanHandFK(anatomy)
-    #ika = CleanHandIKA(fk)
-    ika = JacobianIKA(fk) # Proviamo anche il solutore Jacobiano su dati puliti, per vedere se riesce a migliorare ulteriormente l'errore (dovrebbe essere più fluido ma con errore medio simile)
-    
-    num_frames = len(cleaned_landmarks_array)
-    print(f"\n--- AVVIO TRACKING CONTINUO SUI DATI REALI (Dati Puliti) ---")
-    print(f"Elaborazione di {num_frames} frame. Potrebbe richiedere qualche minuto...")
-    
-    mean_errors = np.zeros(num_frames)
-    max_errors = np.zeros(num_frames)
-    
-    ika_pred_data = []
-    IMG_WIDTH = 640
-    IMG_HEIGHT = 480
+    num_frames = len(df_orig)
     
     is_metric = detect_coordinate_format(df_orig)
     if is_metric:
         SCALE_X = SCALE_Y = SCALE_Z = 1000.0
+        unit = "mm"
     else:
         SCALE_X, SCALE_Y, SCALE_Z = 640.0, 480.0, 640.0
-    
-    # Inseguiamo la mano frame per frame processandoli tutti
+        unit = "px"
+
+    # 1. Preparazione Dati Grezzi
+    raw_landmarks_array = np.zeros((num_frames, 21, 3))
     for f in range(num_frames):
-        # PRENDIAMO I DATI DAL VETTORE PULITO E PROIETTATO!
-        target_lms = cleaned_landmarks_array[f].copy()
+        row = df_orig.iloc[f]
+        for i in range(21):
+            raw_landmarks_array[f, i] = [
+                row[f'LM_{i}_X'] * SCALE_X, 
+                row[f'LM_{i}_Y'] * SCALE_Y, 
+                row[f'LM_{i}_Z'] * SCALE_Z
+            ]
+
+    # 2. Preparazione Dati Preprocessati
+    cleaned_landmarks_array = preprocess_mediapipe_data(KIN_FILE, anatomy)
+    
+    fk = CleanHandFK(anatomy)
+    
+    # ==========================================
+    # TEST IKA: DATI GREZZI VS PREPROCESSATI
+    # ==========================================
+    print(f"\n--- AVVIO TRACKING IKA SUI DATI GREZZI ---")
+    ika_raw = JacobianIKA(fk)
+    all_lms_errors_raw = np.zeros((num_frames, 21))
+    mean_errors_raw = np.zeros(num_frames)
+    
+    for f in range(num_frames):
+        target_lms = raw_landmarks_array[f].copy()
+        target_lms = target_lms - target_lms[0].copy()
         
+        q_sol = ika_raw.solve(target_lms)
+        pred_lms = fk.forward(q_sol)
+        error_val = np.linalg.norm(target_lms - pred_lms, axis=1)
+        
+        all_lms_errors_raw[f, :] = error_val
+        mean_errors_raw[f] = np.mean(error_val)
+        
+        if f % 100 == 0:
+            print(f"Frame {f:04d}/{num_frames} | Errore Medio Grezzi: {mean_errors_raw[f]:.2f} {unit}")
+            
+    print(f"Errore Medio Globale (Grezzi): {np.mean(mean_errors_raw):.2f} {unit}")
+
+    print(f"\n--- AVVIO TRACKING IKA SUI DATI PREPROCESSATI ---")
+    ika_clean = JacobianIKA(fk)
+    all_lms_errors_clean = np.zeros((num_frames, 21))
+    mean_errors_clean = np.zeros(num_frames)
+    max_errors_clean = np.zeros(num_frames)
+    ika_pred_data = []
+    
+    for f in range(num_frames):
+        target_lms = cleaned_landmarks_array[f].copy()
         wrist_pos = target_lms[0].copy()
         target_lms = target_lms - wrist_pos # Centriamo il polso
         
-        # L'Auto-Scaling esterno è stato rimosso perché i dati puliti 
-        # garantiscono già le perfette lunghezze metriche e le corrette proporzioni in pixel.
-            
-        # Risolviamo!
-        q_sol = ika.solve(target_lms)
+        q_sol = ika_clean.solve(target_lms)
         
         # Log di controllo
         pred_lms = fk.forward(q_sol)
-        error_px = np.linalg.norm(target_lms - pred_lms, axis=1)
+        error_val = np.linalg.norm(target_lms - pred_lms, axis=1)
+        all_lms_errors_clean[f, :] = error_val
+        mean_errors_clean[f] = np.mean(error_val)
+        max_errors_clean[f] = np.max(error_val)
         
         # Riportiamo la mano nella posizione originale nello schermo per l'animazione
         pred_lms_abs = pred_lms + wrist_pos
         
-        # Prepariamo la riga per il nuovo CSV convertendo di nuovo in scala normalizzata [0-1]
+        # Prepariamo la riga per il nuovo CSV convertendo di nuovo in scala normalizzata
         row_dict = {}
         if 'Timestamp_LSL' in df_orig.columns:
             row_dict['Timestamp_LSL'] = df_orig.iloc[f]['Timestamp_LSL']
@@ -713,13 +742,10 @@ if __name__ == "__main__":
             row_dict[f'LM_{i}_Z'] = pred_lms_abs[i, 2] / SCALE_Z
         ika_pred_data.append(row_dict)
         
-        mean_errors[f] = np.mean(error_px)
-        max_errors[f] = np.max(error_px)
-        
         if f % 100 == 0:
-            print(f"Frame {f:04d}/{num_frames} | Errore Medio: {mean_errors[f]:.2f} px | Errore Max: {max_errors[f]:.2f} px")
+            print(f"Frame {f:04d}/{num_frames} | Errore Medio Preprocessati: {mean_errors_clean[f]:.2f} {unit} | Errore Max: {max_errors_clean[f]:.2f} {unit}")
             
-    print(f"\nElaborazione completata. Errore Medio Globale: {np.mean(mean_errors):.2f} px")
+    print(f"\nElaborazione completata. Errore Medio Globale (Preprocessati): {np.mean(mean_errors_clean):.2f} {unit}")
 
     # Salvataggio del nuovo CSV
     df_ika_pred = pd.DataFrame(ika_pred_data)
@@ -727,19 +753,102 @@ if __name__ == "__main__":
     df_ika_pred.to_csv(out_csv, index=False)
     print(f"Predizioni IKA salvate per l'animazione in: {os.path.basename(out_csv)}\n")
 
-    # Plot dell'errore nel tempo
+    # ==========================================
+    # PLOTTING DEI RISULTATI
+    # ==========================================
+    eval_dir = os.path.join(BASE_DIR, "eval")
+    os.makedirs(eval_dir, exist_ok=True)
+    
+    # 1. Plot dell'errore nel tempo (Preprocessati)
     plt.figure(figsize=(12, 6))
     frames = np.arange(num_frames)
-    plt.plot(frames, mean_errors, label='Errore Medio (px)', color='blue')
-    plt.plot(frames, max_errors, label='Errore Massimo per frame (px)', color='red', alpha=0.3)
-    plt.axhline(y=np.mean(mean_errors), color='green', linestyle='--', label=f'Media Globale ({np.mean(mean_errors):.2f} px)')
+    plt.plot(frames, mean_errors_clean, label=f'Errore Medio ({unit})', color='blue')
+    plt.plot(frames, max_errors_clean, label=f'Errore Massimo per frame ({unit})', color='red', alpha=0.3)
+    plt.axhline(y=np.mean(mean_errors_clean), color='green', linestyle='--', label=f'Media Globale ({np.mean(mean_errors_clean):.2f} {unit})')
     
-    plt.title(f'Errore di Ricostruzione IKA nel tempo (Dati Pre-processati)\nFile: {os.path.basename(KIN_FILE)}')
+    plt.title(f'Errore di Ricostruzione IKA nel tempo (Dati Preprocessati)\nFile: {os.path.basename(KIN_FILE)}')
     plt.xlabel('Frame')
-    plt.ylabel('Errore (pixel)')
+    plt.ylabel(f'Errore ({unit})')
     plt.legend()
     plt.grid(True, linestyle=':', alpha=0.7)
     plt.tight_layout()
+    
+    timeplot_filename = os.path.join(eval_dir, f"error_time_preprocessati_{os.path.basename(KIN_FILE).replace('.csv', '.png')}")
+    plt.savefig(timeplot_filename, dpi=300)
+    
+    # 2. Plot dell'errore nel tempo (Confronto Medie)
+    plt.figure(figsize=(12, 6))
+    plt.plot(frames, mean_errors_raw, label=f'Errore Medio Grezzi', color='#ff9999', alpha=0.8)
+    plt.plot(frames, mean_errors_clean, label=f'Errore Medio Preprocessati', color='#99ccff', linewidth=2)
+    plt.axhline(y=np.mean(mean_errors_raw), color='#cc0000', linestyle='--', label=f'Media Grezzi ({np.mean(mean_errors_raw):.2f} {unit})')
+    plt.axhline(y=np.mean(mean_errors_clean), color='#0000cc', linestyle='--', label=f'Media Preproc ({np.mean(mean_errors_clean):.2f} {unit})')
+    
+    plt.title(f'Confronto Errore di Ricostruzione IKA nel tempo\nFile: {os.path.basename(KIN_FILE)}')
+    plt.xlabel('Frame')
+    plt.ylabel(f'Errore ({unit})')
+    plt.legend()
+    plt.grid(True, linestyle=':', alpha=0.7)
+    plt.tight_layout()
+    
+    timeplot_comp_filename = os.path.join(eval_dir, f"error_time_confronto_{os.path.basename(KIN_FILE).replace('.csv', '.png')}")
+    plt.savefig(timeplot_comp_filename, dpi=300)
+
+    # 3. Box plot compattato (Confronto per singolo Landmark) con asse spezzato
+    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(15, 6), gridspec_kw={'height_ratios': [1, 3]})
+    fig.subplots_adjust(hspace=0.05)
+    
+    positions_raw = np.arange(21) * 2.0 - 0.4
+    positions_clean = np.arange(21) * 2.0 + 0.4
+    
+    for ax in [ax1, ax2]:
+        ax.boxplot(all_lms_errors_raw, positions=positions_raw, widths=0.6, patch_artist=True,
+                   boxprops=dict(facecolor="#ff9999", color="#cc0000"),
+                   medianprops=dict(color="#cc0000", linewidth=2),
+                   flierprops={'marker': 'o', 'markersize': 3, 'alpha': 0.3, 'markeredgecolor': '#cc0000'})
+                             
+        ax.boxplot(all_lms_errors_clean, positions=positions_clean, widths=0.6, patch_artist=True,
+                   boxprops=dict(facecolor="#99ccff", color="#0000cc"),
+                   medianprops=dict(color="#0000cc", linewidth=2),
+                   flierprops={'marker': 'o', 'markersize': 3, 'alpha': 0.3, 'markeredgecolor': '#0000cc'})
+                           
+    ax1.set_ylim(80, 130)
+    ax2.set_ylim(0, 30)
+
+    ax1.spines['bottom'].set_visible(False)
+    ax2.spines['top'].set_visible(False)
+    ax1.tick_params(labelbottom=False)
+    ax2.xaxis.tick_bottom()
+
+    d = .015  
+    kwargs = dict(transform=ax1.transAxes, color='k', clip_on=False)
+    ax1.plot((-d, +d), (-d, +d), **kwargs)       
+    ax1.plot((1 - d, 1 + d), (-d, +d), **kwargs) 
+
+    kwargs.update(transform=ax2.transAxes)  
+    ax2.plot((-d, +d), (1 - d, 1 + d), **kwargs)  
+    ax2.plot((1 - d, 1 + d), (1 - d, 1 + d), **kwargs)  
+    
+    ax2.set_xticks(np.arange(21) * 2.0)
+    ax2.set_xticklabels([f'LM_{i}' for i in range(21)], rotation=45)
+    
+    ax1.set_title(f'Distribuzione dell\'Errore per singolo Landmark (Grezzi vs Preprocessati)\nFile: {os.path.basename(KIN_FILE)}')
+    ax2.set_xlabel('Landmark')
+    fig.text(0.04, 0.5, f'Errore ({unit})', va='center', rotation='vertical', fontsize=12)
+    
+    import matplotlib.patches as mpatches
+    legend_elements = [
+        mpatches.Patch(facecolor='#ff9999', edgecolor='#cc0000', label='Dati Grezzi'),
+        mpatches.Patch(facecolor='#99ccff', edgecolor='#0000cc', label='Dati Preprocessati')
+    ]
+    ax1.legend(handles=legend_elements, loc='upper right')
+    ax1.grid(True, linestyle=':', alpha=0.7, axis='y')
+    ax2.grid(True, linestyle=':', alpha=0.7, axis='y')
+    
+    boxplot_comp_filename = os.path.join(eval_dir, f"boxplot_confronto_{os.path.basename(KIN_FILE).replace('.csv', '.png')}")
+    plt.savefig(boxplot_comp_filename, dpi=300, bbox_inches='tight')
+    
+    print(f"Tutti i grafici di confronto sono stati salvati nella cartella: {eval_dir}")
+    
     plt.show()
 
 
