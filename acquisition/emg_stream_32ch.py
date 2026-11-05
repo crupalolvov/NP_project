@@ -1,4 +1,4 @@
-"""Real-time 32-channel HD-EMG acquisition, visualization and LSL streaming.
+"""Real-time 32-channel MD-EMG acquisition, visualization and LSL streaming.
 
 Connects to the OT Bioelettronica Sessantaquattro over TCP, converts the raw
 samples to µV, optionally filters them (band-pass 10-450 Hz + 50 Hz notch
@@ -149,7 +149,7 @@ class EMGViewer(QtWidgets.QWidget):
         self.sample_freq = sample_freq
         self.tracks = []
 
-        self.setWindowTitle("Sessantaquattro - HD-EMG & LSL")
+        self.setWindowTitle("Sessantaquattro - MD-EMG & LSL")
         self.setGeometry(100, 100, 500, 150)
         layout = QtWidgets.QVBoxLayout(self)
 
