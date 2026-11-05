@@ -1,107 +1,91 @@
+"""Static hand calibration from a single photo of the open hand.
+
+Alternative to the video-based calibration (``extract_anatomy_from_csv``):
+MediaPipe world landmarks of one photo give the bone lengths and metacarpal
+vectors, converted to millimetres like the rest of the pipeline. The result
+is saved to ``data/calibration/hand_calibration_photo.pt`` (so the default
+calibration is never overwritten) and the detected skeleton is shown on the
+photo.
+
+Usage:
+    python -m kinematics.photo_calibration [--image path.jpg] [--output file.pt]
+"""
+import argparse
+from pathlib import Path
+
 import cv2
 import mediapipe as mp
 import numpy as np
 import torch
-import os
+
+import config
+from kinematics.hand_kinematics import FINGER_DEFS
+
+M_TO_MM = 1000.0   # world landmarks are in metres, the hand model works in mm
+
 
 def main():
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    IMAGE_PATH = os.path.join(BASE_DIR, "mano_estesa.jpg")
-    OUTPUT_PATH = os.path.join(BASE_DIR, "hand_calibration.pt")
+    parser = argparse.ArgumentParser(description="Hand calibration from a photo.")
+    parser.add_argument("--image", type=Path, default=config.CALIBRATION_PHOTO)
+    parser.add_argument("--output", type=Path, default=config.CALIBRATION_DIR / "hand_calibration_photo.pt")
+    args = parser.parse_args()
 
-    if not os.path.exists(IMAGE_PATH):
-        print(f"ERRORE: Inserisci una foto chiamata 'mano_estesa.jpg' nella cartella:\n{BASE_DIR}")
+    if not args.image.exists():
+        print(f"ERROR: photo '{args.image}' not found.")
+        return
+    if not config.HAND_LANDMARKER_MODEL.exists():
+        print(f"ERROR: model file '{config.HAND_LANDMARKER_MODEL}' not found.")
         return
 
-    print("Caricamento MediaPipe e analisi foto...")
-    BaseOptions = mp.tasks.BaseOptions
-    HandLandmarker = mp.tasks.vision.HandLandmarker
-    HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
-    VisionRunningMode = mp.tasks.vision.RunningMode
-
-    MODEL_PATH = os.path.join(BASE_DIR, "hand_landmarker.task")
-    if not os.path.exists(MODEL_PATH):
-        print(f"ERRORE: File del modello '{MODEL_PATH}' non trovato.")
-        return
-
-    options = HandLandmarkerOptions(
-        base_options=BaseOptions(model_asset_path=MODEL_PATH),
-        running_mode=VisionRunningMode.IMAGE,
+    vision = mp.tasks.vision
+    options = vision.HandLandmarkerOptions(
+        base_options=mp.tasks.BaseOptions(model_asset_path=str(config.HAND_LANDMARKER_MODEL)),
+        running_mode=vision.RunningMode.IMAGE,
         num_hands=1,
-        min_hand_detection_confidence=0.5)
-    
-    with HandLandmarker.create_from_options(options) as landmarker:
-        img = cv2.imread(IMAGE_PATH)
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-        results = landmarker.detect(mp_image)
+        min_hand_detection_confidence=0.5,
+    )
+    with vision.HandLandmarker.create_from_options(options) as landmarker:
+        img = cv2.imread(str(args.image))
+        results = landmarker.detect(mp.Image(image_format=mp.ImageFormat.SRGB,
+                                             data=cv2.cvtColor(img, cv2.COLOR_BGR2RGB)))
 
-        if not results.hand_world_landmarks:
-            print("ERRORE: Nessuna mano rilevata nella foto. Prova con una foto in cui il palmo è ben visibile.")
-            return
+    if not results.hand_world_landmarks:
+        print("ERROR: no hand detected. Use a photo where the palm is clearly visible.")
+        return
 
-        print("Mano rilevata! Estrazione delle coordinate 3D metriche...")
-        # Usiamo i world_landmarks (in metri, con polso nell'origine) per avere le proporzioni reali
-        hand_lms = results.hand_world_landmarks[0]
-        
-        lms = np.zeros((21, 3))
-        for i, lm in enumerate(hand_lms):
-            lms[i] = [lm.x, lm.y, lm.z]
+    # World landmarks: metric, wrist at the origin -> real proportions
+    lms = np.array([[lm.x, lm.y, lm.z] for lm in results.hand_world_landmarks[0]]) * M_TO_MM
 
-        # Dizionario delle ossa e dei giunti
-        bones = {
-            'Thumb_Proximal': (1, 2), 'Thumb_Intermediate': (2, 3), 'Thumb_Distal': (3, 4),
-            'Index_Proximal': (5, 6), 'Index_Intermediate': (6, 7), 'Index_Distal': (7, 8),
-            'Middle_Proximal': (9, 10), 'Middle_Intermediate': (10, 11), 'Middle_Distal': (11, 12),
-            'Ring_Proximal': (13, 14), 'Ring_Intermediate': (14, 15), 'Ring_Distal': (15, 16),
-            'Pinky_Proximal': (17, 18), 'Pinky_Intermediate': (18, 19), 'Pinky_Distal': (19, 20)
-        }
+    bones = {}
+    for lms_idx, bone_names in FINGER_DEFS.values():
+        for k, name in enumerate(bone_names):
+            bones[name] = (lms_idx[k], lms_idx[k + 1])
 
-        calib_data = {'lengths': {}, 'meta_vectors': {}}
+    calib = {
+        "lengths": {name: float(np.linalg.norm(lms[b] - lms[a])) for name, (a, b) in bones.items()},
+        "meta_vectors": {finger: lms[idx[0]] - lms[0] for finger, (idx, _) in FINGER_DEFS.items()},
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(calib, args.output)
+    print(f"Calibration saved to {args.output}")
 
-        # 1. Calcolo lunghezze falangi
-        for bone_name, (idx1, idx2) in bones.items():
-            calib_data['lengths'][bone_name] = float(np.linalg.norm(lms[idx2] - lms[idx1]))
+    # Preview of the detected skeleton
+    image_lms = results.hand_landmarks[0]
+    h, w, _ = img.shape
+    px = [(int(lm.x * w), int(lm.y * h)) for lm in image_lms]
+    for idx in (1, 5, 9, 13, 17):
+        cv2.line(img, px[0], px[idx], (0, 255, 0), 3)
+    for a, b in bones.values():
+        cv2.line(img, px[a], px[b], (0, 255, 0), 3)
+    for p in px:
+        cv2.circle(img, p, 6, (0, 0, 255), -1)
+    scale = min(800 / h, 800 / w)
+    if scale < 1:
+        img = cv2.resize(img, (int(w * scale), int(h * scale)))
+    cv2.imshow("Calibration (press any key to close)", img)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
-        # 2. Calcolo vettori metacarpi dal polso (LM 0)
-        meta_bases = {'Thumb': 1, 'Index': 5, 'Middle': 9, 'Ring': 13, 'Pinky': 17}
-        for finger, idx in meta_bases.items():
-            calib_data['meta_vectors'][finger] = np.array(lms[idx] - lms[0])
-
-        # Salvataggio Universale
-        torch.save(calib_data, OUTPUT_PATH)
-        print(f"SUCCESSO! Calibrazione statica salvata in:\n{OUTPUT_PATH}")
-        print("Ora IKA.py e animate_hand.py useranno sempre questa misura perfetta.")
-        
-        # --- VISUALIZZAZIONE RISULTATI SULLA FOTO ---
-        print("\nGenerazione anteprima visiva in corso...")
-        image_landmarks = results.hand_landmarks[0] # Coordinate per il disegno sull'immagine (normalizzate 0-1)
-        h, w, _ = img.shape
-        
-        # Disegna i metacarpi (dal polso LM_0 alla base di ogni dito)
-        for idx in [1, 5, 9, 13, 17]:
-            p1 = (int(image_landmarks[0].x * w), int(image_landmarks[0].y * h))
-            p2 = (int(image_landmarks[idx].x * w), int(image_landmarks[idx].y * h))
-            cv2.line(img, p1, p2, (0, 255, 0), 3)
-            
-        # Disegna le falangi usando il dizionario 'bones' esistente
-        for bone_name, (idx1, idx2) in bones.items():
-            p1 = (int(image_landmarks[idx1].x * w), int(image_landmarks[idx1].y * h))
-            p2 = (int(image_landmarks[idx2].x * w), int(image_landmarks[idx2].y * h))
-            cv2.line(img, p1, p2, (0, 255, 0), 3)
-            
-        # Disegna i landmark (articolazioni) come punti rossi
-        for lm in image_landmarks:
-            cv2.circle(img, (int(lm.x * w), int(lm.y * h)), 6, (0, 0, 255), -1)
-            
-        # Ridimensiona l'immagine se è troppo grande per lo schermo (es. foto da smartphone)
-        scale = min(800 / h, 800 / w)
-        if scale < 1:
-            img = cv2.resize(img, (int(w * scale), int(h * scale)))
-            
-        cv2.imshow("Calibrazione (Premi un tasto qualsiasi sulla foto per chiudere)", img)
-        cv2.waitKey(0) # Mette in pausa lo script finché non premi un tasto
-        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()

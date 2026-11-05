@@ -1,4 +1,19 @@
-dataset/
-#recordings/
-#eval/
-#*.pt
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Quick debug recordings from the streamers (not part of the dataset)
+data/debug/
+
+# Regenerated reports
+results/optuna_param_importances.html
+results/optuna_slice_plot.html
+results/figures/emg_spectrum/

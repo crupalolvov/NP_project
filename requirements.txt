@@ -1,13 +1,21 @@
-opencv-python
-mediapipe
-PyQt5
-pyqtgraph
+# Core numerics
 numpy
 scipy
-pylsl
 pandas
 matplotlib
+scikit-learn
+
+# Deep learning
 torch
 optuna
-plotly
-pynput
+plotly          # Optuna HTML reports
+onnx            # decoder.export_onnx
+onnxscript
+
+# Acquisition (only needed to record new data)
+pylsl           # Lab Streaming Layer
+PyQt5
+pyqtgraph
+opencv-python
+mediapipe
+pynput          # keyboard control of the recorder

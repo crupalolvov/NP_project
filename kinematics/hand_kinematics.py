@@ -1,137 +1,132 @@
+"""Biomechanical hand model: calibration, forward and inverse kinematics.
+
+MediaPipe landmarks are noisy and their bone lengths change from frame to
+frame. This module turns them into a consistent 24-DoF joint-angle
+representation:
+
+* ``extract_anatomy_from_csv``  - subject-specific bone lengths and
+  metacarpal vectors from a steady open-hand segment.
+* ``preprocess_mediapipe_data`` - Savitzky-Golay smoothing, projection on a
+  rigid skeleton, 1-DoF hinge constraints and soft range-of-motion limits
+  (Stillfried et al.).
+* ``CleanHandFK``               - forward kinematics, 24 angles -> 21 landmarks.
+* ``JacobianIKA``               - damped-least-squares (Levenberg-Marquardt)
+  inverse kinematics, 21 landmarks -> 24 angles (used by the pipeline).
+* ``CleanHandIKA``              - alternative per-finger SLSQP solver.
+
+DoF layout: 0-2 wrist (roll, pitch, yaw), 3-7 thumb (CMC flex/abd, MCP
+flex/abd, IP), then 4 per finger for index, middle, ring and pinky
+(MCP flex, MCP abd, PIP, DIP).
+"""
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
-import os
-from scipy.signal import savgol_filter
 import torch
-import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+from scipy.signal import savgol_filter
+
+import config
+
+FINGER_DEFS = {
+    'Thumb':  ([1, 2, 3, 4],     ['Thumb_Proximal', 'Thumb_Intermediate', 'Thumb_Distal']),
+    'Index':  ([5, 6, 7, 8],     ['Index_Proximal', 'Index_Intermediate', 'Index_Distal']),
+    'Middle': ([9, 10, 11, 12],  ['Middle_Proximal', 'Middle_Intermediate', 'Middle_Distal']),
+    'Ring':   ([13, 14, 15, 16], ['Ring_Proximal', 'Ring_Intermediate', 'Ring_Distal']),
+    'Pinky':  ([17, 18, 19, 20], ['Pinky_Proximal', 'Pinky_Intermediate', 'Pinky_Distal']),
+}
+
+# Range of motion of the 1-DoF hinge joints in radians (Stillfried et al.)
+MIN_FLEXION_BOUNDS = {
+    'Thumb_IP': -0.26,
+    'Index_PIP': -0.09, 'Index_DIP': -0.17,
+    'Middle_PIP': -0.09, 'Middle_DIP': -0.17,
+    'Ring_PIP': -0.09, 'Ring_DIP': -0.17,
+    'Pinky_PIP': -0.09, 'Pinky_DIP': -0.17,
+}
+MAX_FLEXION_BOUNDS = {
+    'Thumb_IP': 1.54,
+    'Index_PIP': 2.23, 'Index_DIP': 1.79,
+    'Middle_PIP': 2.25, 'Middle_DIP': 1.96,
+    'Ring_PIP': 2.27, 'Ring_DIP': 1.66,
+    'Pinky_PIP': 2.18, 'Pinky_DIP': 1.64,
+}
+
 
 def detect_coordinate_format(df):
-    """
-    Rileva automaticamente se il dataframe contiene world_landmarks (metri) o normalizzati (pixel).
-    I world_landmarks hanno il polso all'origine (0,0,0) e assumono valori negativi.
+    """True for MediaPipe *world* landmarks (metres), False for normalized image coordinates.
+
+    World landmarks are wrist-centred, so they take negative values.
     """
     min_x = df[[f'LM_{i}_X' for i in range(21)]].min().min()
     min_y = df[[f'LM_{i}_Y' for i in range(21)]].min().min()
-    if min_x < -0.01 or min_y < -0.01 or df['LM_0_X'].abs().max() < 1e-4:
-        return True # Metrico
-    return False # Normalizzato
+    return bool(min_x < -0.01 or min_y < -0.01 or df['LM_0_X'].abs().max() < 1e-4)
 
-# --- Helper function for Rodrigues' rotation ---
+
+def coordinate_scale(is_metric):
+    """Scale factors that bring landmarks to mm (metric) or 640x480 pixels."""
+    return (1000.0, 1000.0, 1000.0) if is_metric else (640.0, 480.0, 640.0)
+
+
+def load_landmarks(df, scale):
+    """``(frames, 21, 3)`` array of scaled landmark coordinates."""
+    cols = [f'LM_{i}_{ax}' for i in range(21) for ax in 'XYZ']
+    return df[cols].to_numpy(dtype=float).reshape(len(df), 21, 3) * np.asarray(scale)
+
+
 def rotate_vector_by_rodrigues(v, k, theta):
-    """
-    Rotates vector v around axis k by angle theta using Rodrigues' rotation formula.
-    v: vector to rotate
-    k: rotation axis (unit vector)
-    theta: rotation angle (radians)
-    """
-    # Ensure k is a unit vector, add epsilon for safety against division by zero if k is near zero
+    """Rotate ``v`` around axis ``k`` by ``theta`` radians (Rodrigues' formula)."""
     norm_k = np.linalg.norm(k)
-    k_unit = k / (norm_k + 1e-8) if norm_k > 1e-8 else np.array([0.0, 0.0, 1.0]) # Fallback to Z-axis if k is zero
-    v_rot = v * np.cos(theta) + np.cross(k_unit, v) * np.sin(theta) + k_unit * np.dot(k_unit, v) * (1 - np.cos(theta))
-    return v_rot
+    k_unit = k / (norm_k + 1e-8) if norm_k > 1e-8 else np.array([0.0, 0.0, 1.0])
+    return (v * np.cos(theta) + np.cross(k_unit, v) * np.sin(theta)
+            + k_unit * np.dot(k_unit, v) * (1 - np.cos(theta)))
 
-#Aggiungo limitazione delle distanze dei punti fra loro, operando dirrettamente sui dati originali!
+
 def preprocess_mediapipe_data(csv_path, anatomy, window_length=15, polyorder=3):
-    """
-    Pulisce i dati di MediaPipe eliminando outlier temporali 
-    e forzando la rigidità ossea SUL CORRETTO PIANO DI ROTAZIONE con limiti RoM.
-    """
-    # Dizionari estratti dall'anatomia (Stillfried et al.)
-    min_flexion_bounds = {
-        'Thumb_IP': -0.26,   
-        'Index_PIP': -0.09,  
-        'Index_DIP': -0.17,  
-        'Middle_PIP': -0.09, 
-        'Middle_DIP': -0.17, 
-        'Ring_PIP': -0.09,   
-        'Ring_DIP': -0.17,   
-        'Pinky_PIP': -0.09,  
-        'Pinky_DIP': -0.17,  
-    }
+    """Clean MediaPipe landmarks before inverse kinematics.
 
-    max_flexion_bounds = {
-        'Thumb_IP': 1.54,    
-        'Index_PIP': 2.23,   
-        'Index_DIP': 1.79,   
-        'Middle_PIP': 2.25,  
-        'Middle_DIP': 1.96,  
-        'Ring_PIP': 2.27,    
-        'Ring_DIP': 1.66,    
-        'Pinky_PIP': 2.18,   
-        'Pinky_DIP': 1.64,   
-    }
-
-    print("--- AVVIO PRE-PROCESSING CINEMATICO (PLANARE RIGOROSO CON HARD-CLAMP) ---")
+    Removes temporal outliers and enforces bone rigidity on the correct
+    rotation plane, with soft range-of-motion limits. Writes
+    ``<csv>_preprocessed.csv`` and returns the cleaned ``(frames, 21, 3)`` array.
+    """
+    print("--- Kinematic preprocessing (rigid skeleton + RoM clamp) ---")
     df = pd.read_csv(csv_path)
     num_frames = len(df)
-    
-    IMG_WIDTH = 640
-    IMG_HEIGHT = 480
+
     is_metric = detect_coordinate_format(df)
-    if is_metric:
-        SCALE_X = SCALE_Y = SCALE_Z = 1000.0 # Convertiamo i metri in millimetri
-        print("--- RILEVATI DATI IN METRI (World Landmarks) -> Scalo uniformemente in millimetri ---")
-    else:
-        SCALE_X, SCALE_Y, SCALE_Z = 640.0, 480.0, 640.0
-        print("--- RILEVATI DATI IN PIXEL (Normalizzati) -> Scalo a 640x480 ---")
-    
-    raw_lms = np.zeros((num_frames, 21, 3))
-    for f in range(num_frames):
-        row = df.iloc[f]
-        for i in range(21):
-            raw_lms[f, i] = [
-                row[f'LM_{i}_X'] * SCALE_X, 
-                row[f'LM_{i}_Y'] * SCALE_Y, 
-                row[f'LM_{i}_Z'] * SCALE_Z
-            ]
-            
-    print(f"1. Filtraggio temporale (Savitzky-Golay)...")
+    scale = coordinate_scale(is_metric)
+    print("Metric world landmarks detected -> scaling to mm" if is_metric
+          else "Normalized landmarks detected -> scaling to 640x480 px")
+    raw_lms = load_landmarks(df, scale)
+
+    print("1. Temporal smoothing (Savitzky-Golay)...")
     smoothed_lms = np.zeros_like(raw_lms)
     for i in range(21):
         for axis in range(3):
             smoothed_lms[:, i, axis] = savgol_filter(raw_lms[:, i, axis], window_length, polyorder)
-            
-    print("2. Proiezione su scheletro rigido e cerniere anatomiche...")
+
+    print("2. Projection on the rigid skeleton and anatomical hinges...")
     fixed_lms = np.zeros_like(smoothed_lms)
-    
-    finger_defs = {
-        'Thumb':  ([1, 2, 3, 4],    ['Thumb_Proximal', 'Thumb_Intermediate', 'Thumb_Distal']),
-        'Index':  ([5, 6, 7, 8],    ['Index_Proximal', 'Index_Intermediate', 'Index_Distal']),
-        'Middle': ([9, 10, 11, 12], ['Middle_Proximal', 'Middle_Intermediate', 'Middle_Distal']),
-        'Ring':   ([13, 14, 15, 16],['Ring_Proximal', 'Ring_Intermediate', 'Ring_Distal']),
-        'Pinky':  ([17, 18, 19, 20],['Pinky_Proximal', 'Pinky_Intermediate', 'Pinky_Distal'])
-    }
-    
-    
+
     for f in range(num_frames):
         fixed_lms[f, 0] = smoothed_lms[f, 0]
-        # 1. Ricalcoliamo il sistema di riferimento del palmo DINAMICAMENTE
+        # Palm reference frame, recomputed at every frame
         v_idx_f = smoothed_lms[f, 5] - smoothed_lms[f, 0]
         v_mid_f = smoothed_lms[f, 9] - smoothed_lms[f, 0]
         v_pnk_f = smoothed_lms[f, 17] - smoothed_lms[f, 0]
-        
+
         X_palm_f = v_idx_f - v_pnk_f
         X_palm_f /= (np.linalg.norm(X_palm_f) + 1e-8)
-        Z_palm_f = np.cross(X_palm_f, v_mid_f) 
+        Z_palm_f = np.cross(X_palm_f, v_mid_f)
         Z_palm_f /= (np.linalg.norm(Z_palm_f) + 1e-8)
 
-        # --- LOGICA POLLICE DINAMICA ---
-        thumb_lms = smoothed_lms[f, 1:5] 
-        # Definizione dell'asse flessione del Pollice (X_thumb)
-        # Il pollice ruota su un asse ortogonale al piano Z_palm e alla direzione MCP-IP
-        v_mcp_ip = thumb_lms[2] - thumb_lms[1]
-        X_thumb = np.cross(Z_palm_f, v_mcp_ip)
-        X_thumb /= (np.linalg.norm(X_thumb) + 1e-8)
-        
-        for finger, (lms_idx, bone_names) in finger_defs.items():
-            # 2. Ricalcoliamo l'asse della cerniera base per questo specifico frame
+        for finger, (lms_idx, bone_names) in FINGER_DEFS.items():
+            # Base hinge axis for this frame
             Y_local_f = smoothed_lms[f, lms_idx[0]] - fixed_lms[f, 0]
             Y_local_f /= (np.linalg.norm(Y_local_f) + 1e-8)
-            
+
             if finger == 'Thumb':
-                X_local = Z_palm_f.copy() # Pollice: l'asse di flessione è la normale al palmo
-                # Ortogonalizziamo per allinearci perfettamente a R_splay di CleanHandFK
+                # Thumb: the flexion axis is the palm normal, orthogonalized to
+                # match R_splay in CleanHandFK
+                X_local = Z_palm_f.copy()
                 Z_local_t = np.cross(X_local, Y_local_f)
                 Z_local_t /= (np.linalg.norm(Z_local_t) + 1e-8)
                 X_local = np.cross(Y_local_f, Z_local_t)
@@ -141,764 +136,377 @@ def preprocess_mediapipe_data(csv_path, anatomy, window_length=15, polyorder=3):
                 if np.linalg.norm(X_local) < 1e-8:
                     X_local = X_palm_f.copy()
                 X_local /= np.linalg.norm(X_local)
-                
-            # -- 1. SISTEMIAMO IL METACARPO --
+
+            # -- Metacarpal: keep the direction, impose the calibrated length --
             mcp_idx = lms_idx[0]
             dir_meta = smoothed_lms[f, mcp_idx] - fixed_lms[f, 0]
             norm_meta = np.linalg.norm(dir_meta)
-            if norm_meta > 1e-6: dir_meta /= norm_meta
-            
+            if norm_meta > 1e-6:
+                dir_meta /= norm_meta
             len_meta = np.linalg.norm(anatomy['meta_vectors'][finger])
-            fixed_lms[f, mcp_idx] = fixed_lms[f, 0] + (dir_meta * len_meta)
+            fixed_lms[f, mcp_idx] = fixed_lms[f, 0] + dir_meta * len_meta
 
-            # -- 2. SISTEMIAMO LE FALANGI (CON VINCOLI DoF DINAMICI) --
+            # -- Phalanges, with DoF constraints propagated along the chain --
             parent_idx = mcp_idx
-            current_hinge_axis = X_local 
-            prev_bone_dir_normalized = dir_meta.copy() 
+            current_hinge_axis = X_local
+            prev_bone_dir = dir_meta.copy()
 
             for i, child_idx in enumerate(lms_idx[1:]):
-                dir_bone = smoothed_lms[f, child_idx] - smoothed_lms[f, parent_idx] 
+                dir_bone = smoothed_lms[f, child_idx] - smoothed_lms[f, parent_idx]
 
-                # IDENTIFICHIAMO I GIUNTI A 1-DoF (Cerniere pure - F-E)
+                # Pure flexion-extension hinges (PIP, DIP and thumb IP)
                 is_1dof_hinge = (finger != 'Thumb' and i > 0) or (finger == 'Thumb' and i == 2)
-                
-                # --- FASE 1: APPLICAZIONE DEL VINCOLO ---
+
+                # Step 1: remove the lateral deviation w.r.t. the current hinge axis
                 if is_1dof_hinge:
-                    # Rimuoviamo la deviazione laterale usando l'asse del giunto ATTUALE
-                    lateral_component = np.dot(dir_bone, current_hinge_axis)
-                    dir_bone = dir_bone - (lateral_component * current_hinge_axis)
-                
-                # --- FASE 2: NORMALIZZAZIONE DEL VETTORE PULITO ---
-                norm_bone = np.linalg.norm(dir_bone) 
-                if norm_bone > 1e-6: 
+                    dir_bone = dir_bone - np.dot(dir_bone, current_hinge_axis) * current_hinge_axis
+
+                # Step 2: normalize the cleaned direction
+                norm_bone = np.linalg.norm(dir_bone)
+                if norm_bone > 1e-6:
                     dir_bone /= norm_bone
-                else: 
-                    print(f"ATTENZIONE: dir_bone nullo o quasi nullo al frame {f}, dito {finger}, osso {bone_names[i]}. Usato fallback [0, 1, 0].")
-                    dir_bone = np.array([0.0, 1.0, 0.0]) # Fallback
+                else:
+                    print(f"WARNING: degenerate bone at frame {f}, {finger} {bone_names[i]}; "
+                          f"using fallback [0, 1, 0].")
+                    dir_bone = np.array([0.0, 1.0, 0.0])
 
-                # --- FASE 2.5: ENFORCEMENT LIMITI DI FLESSIONE (per giunti a 1-DoF) ---
-                # --- CLAMPING BIOMECCANICO GLOBALE ---
+                # Step 3: soft range-of-motion clamp on the 1-DoF joints
                 if is_1dof_hinge:
-                    joint_name_for_bounds = None
-                    if finger == 'Thumb' and i == 2: 
-                        joint_name_for_bounds = 'Thumb_IP'
-                    elif finger != 'Thumb': 
-                        if i == 1: joint_name_for_bounds = f'{finger}_PIP'
-                        elif i == 2: joint_name_for_bounds = f'{finger}_DIP'
-                    
-                    if joint_name_for_bounds and joint_name_for_bounds in min_flexion_bounds:
-                        min_rad = min_flexion_bounds[joint_name_for_bounds]
-                        max_rad = max_flexion_bounds[joint_name_for_bounds]
+                    if finger == 'Thumb':
+                        joint = 'Thumb_IP'
+                    else:
+                        joint = f'{finger}_PIP' if i == 1 else f'{finger}_DIP'
+                    min_rad = MIN_FLEXION_BOUNDS[joint]
+                    max_rad = MAX_FLEXION_BOUNDS[joint]
+                    if 'DIP' in joint:
+                        max_rad *= 1.15
 
-                        if 'DIP' in joint_name_for_bounds:
-                            max_rad *= 1.15
-                            
-                        flexion_y_axis = np.cross( prev_bone_dir_normalized, current_hinge_axis) # in questo ordine per avere verso Y corretto!
-                        flexion_y_axis /= (np.linalg.norm(flexion_y_axis) + 1e-8)
-                        
-                        x_comp = np.dot(dir_bone, prev_bone_dir_normalized)
-                        y_comp = np.dot(dir_bone, flexion_y_axis)
-                        current_flexion_angle = np.arctan2(y_comp, x_comp)
-                        
-                        # Se l'angolo sfora uno dei limiti (iperextensione o iperflessione), forziamolo entro il Range of Motion
-                        if current_flexion_angle < min_rad or current_flexion_angle > max_rad:
-                            # Invece di clip netta, portiamo il valore verso il limite con un fattore di smorzamento (es. 0.3)
-                            target = np.clip(current_flexion_angle, min_rad, max_rad)
-                            current_flexion_angle = 0.7 * current_flexion_angle + 0.3 * target
-                            
-                            dir_bone = (prev_bone_dir_normalized * np.cos(current_flexion_angle)) + (flexion_y_axis * np.sin(current_flexion_angle))
-                            dir_bone /= np.linalg.norm(dir_bone)
-                                
-                # --- FASE 3: TRASPORTO DELL'ASSE ---
-                # Utilizziamo Rodrigues per TUTTE le dita, incluso il pollice!
-                # Questo propaga l'asse esattamente come le matrici in CleanHandFK.
-                rotation_axis = np.cross(prev_bone_dir_normalized, dir_bone)
+                    # Cross product in this order gives the correct flexion direction
+                    flexion_y_axis = np.cross(prev_bone_dir, current_hinge_axis)
+                    flexion_y_axis /= (np.linalg.norm(flexion_y_axis) + 1e-8)
+                    flexion = np.arctan2(np.dot(dir_bone, flexion_y_axis), np.dot(dir_bone, prev_bone_dir))
+
+                    if flexion < min_rad or flexion > max_rad:
+                        # Pull towards the limit (damped) instead of a hard clip
+                        target = np.clip(flexion, min_rad, max_rad)
+                        flexion = 0.7 * flexion + 0.3 * target
+                        dir_bone = prev_bone_dir * np.cos(flexion) + flexion_y_axis * np.sin(flexion)
+                        dir_bone /= np.linalg.norm(dir_bone)
+
+                # Step 4: transport the hinge axis along the chain (as CleanHandFK does)
+                rotation_axis = np.cross(prev_bone_dir, dir_bone)
                 norm_rot_axis = np.linalg.norm(rotation_axis)
                 if norm_rot_axis > 1e-8:
                     rotation_axis /= norm_rot_axis
-                    dot_product = np.clip(np.dot(prev_bone_dir_normalized, dir_bone), -1.0, 1.0)
-                    angle = np.arccos(dot_product)
+                    angle = np.arccos(np.clip(np.dot(prev_bone_dir, dir_bone), -1.0, 1.0))
                     current_hinge_axis = rotate_vector_by_rodrigues(current_hinge_axis, rotation_axis, angle)
 
-                # --- FASE 4: RICOSTRUZIONE POSIZIONALE ---
-                len_bone = anatomy['lengths'][bone_names[i]]
-                fixed_lms[f, child_idx] = fixed_lms[f, parent_idx] + dir_bone * len_bone
-                
-                # --- FASE 5: AGGIORNAMENTO VARIABILI DI STATO ---
-                parent_idx = child_idx 
-                prev_bone_dir_normalized = dir_bone.copy() # È fondamentale salvare il vettore PULITO
-                
-    print("Pre-processing completato. Dati pronti per IKA.")
-    
-    # --- Salvataggio CSV ---
-    preprocessed_data = []
-    for f in range(num_frames):
-        row_dict = {}
-        if 'Timestamp_LSL' in df.columns:
-            row_dict['Timestamp_LSL'] = df.iloc[f]['Timestamp_LSL']
-        for i in range(21):
-            row_dict[f'LM_{i}_X'] = fixed_lms[f, i, 0] / SCALE_X
-            row_dict[f'LM_{i}_Y'] = fixed_lms[f, i, 1] / SCALE_Y
-            row_dict[f'LM_{i}_Z'] = fixed_lms[f, i, 2] / SCALE_Z
-        preprocessed_data.append(row_dict)
-        
-    df_preprocessed = pd.DataFrame(preprocessed_data)
-    out_csv = csv_path.replace('.csv', '_preprocessed.csv')
-    df_preprocessed.to_csv(out_csv, index=False)
-    print(f"Dati preprocessati normalizzati salvati in: {os.path.basename(out_csv)}")
-    
-    return fixed_lms    
+                # Step 5: rebuild the joint position with the calibrated bone length
+                fixed_lms[f, child_idx] = fixed_lms[f, parent_idx] + dir_bone * anatomy['lengths'][bone_names[i]]
+                parent_idx = child_idx
+                prev_bone_dir = dir_bone.copy()   # must be the *cleaned* direction
+
+    print("Preprocessing complete, data ready for inverse kinematics.")
+
+    out = pd.DataFrame(fixed_lms.reshape(num_frames, 63) / np.tile(scale, 21),
+                       columns=[f'LM_{i}_{ax}' for i in range(21) for ax in 'XYZ'])
+    if 'Timestamp_LSL' in df.columns:
+        out.insert(0, 'Timestamp_LSL', df['Timestamp_LSL'].values)
+    out_csv = str(csv_path).replace('.csv', '_preprocessed.csv')
+    out.to_csv(out_csv, index=False)
+    print(f"Preprocessed landmarks saved to: {out_csv.split('/')[-1]}")
+    return fixed_lms
 
 
-# --- 1. MATRICI DI ROTAZIONE RIGOROSE ---
+# --- Rotation matrices ------------------------------------------------------
 def Rx(theta):
     return np.array([[1, 0, 0], [0, np.cos(theta), -np.sin(theta)], [0, np.sin(theta), np.cos(theta)]])
+
 
 def Ry(theta):
     return np.array([[np.cos(theta), 0, np.sin(theta)], [0, 1, 0], [-np.sin(theta), 0, np.cos(theta)]])
 
+
 def Rz(theta):
     return np.array([[np.cos(theta), -np.sin(theta), 0], [np.sin(theta), np.cos(theta), 0], [0, 0, 1]])
 
-# --- 2. AUTO-CALIBRAZIONE DA MEDIAPIPE ---
-def extract_anatomy_from_csv(csv_path, start_frame, end_frame):
-    df = pd.read_csv(csv_path).iloc[start_frame:end_frame]
-    num_frames = len(df)
-    
-    bone_links = {
-        'Thumb_Proximal': (1, 2), 'Thumb_Intermediate': (2, 3), 'Thumb_Distal': (3, 4),
-        'Index_Proximal': (5, 6), 'Index_Intermediate': (6, 7), 'Index_Distal': (7, 8),
-        'Middle_Proximal': (9, 10), 'Middle_Intermediate': (10, 11), 'Middle_Distal': (11, 12),
-        'Ring_Proximal': (13, 14), 'Ring_Intermediate': (14, 15), 'Ring_Distal': (15, 16),
-        'Pinky_Proximal': (17, 18), 'Pinky_Intermediate': (18, 19), 'Pinky_Distal': (19, 20)
-    }
-    
-    anatomy = {'lengths': {}, 'meta_vectors': {}}
-    lms_history = np.zeros((num_frames, 21, 3))
-    
-    # Dimensioni dell'immagine usata per la cattura per convertire in pixel
-    IMG_WIDTH = 640
-    IMG_HEIGHT = 480
-    is_metric = detect_coordinate_format(df)
-    if is_metric:
-        SCALE_X = SCALE_Y = SCALE_Z = 1000.0
-    else:
-        SCALE_X, SCALE_Y, SCALE_Z = 640.0, 480.0, 640.0
 
-    for i in range(num_frames):
-        row = df.iloc[i]
-        for lm in range(21):
-            lms_history[i, lm] = [
-                row[f'LM_{lm}_X'] * SCALE_X, 
-                row[f'LM_{lm}_Y'] * SCALE_Y, 
-                row[f'LM_{lm}_Z'] * SCALE_Z
-            ]
-            
-    lms_mean = np.mean(lms_history, axis=0)
-    wrist_pos = lms_mean[0]
-    lms_mean = lms_mean - wrist_pos # Polso in (0,0,0)
-    
-    anatomy['meta_vectors']['Thumb'] = lms_mean[1]
-    anatomy['meta_vectors']['Index'] = lms_mean[5]
-    anatomy['meta_vectors']['Middle'] = lms_mean[9]
-    anatomy['meta_vectors']['Ring'] = lms_mean[13]
-    anatomy['meta_vectors']['Pinky'] = lms_mean[17]
-    
+# --- Anatomical calibration -------------------------------------------------
+def extract_anatomy_from_csv(csv_path, start_frame, end_frame):
+    """Bone lengths and metacarpal vectors averaged over a steady segment."""
+    df = pd.read_csv(csv_path).iloc[start_frame:end_frame]
+    bone_links = {}
+    for finger, (lms_idx, bone_names) in FINGER_DEFS.items():
+        for k, name in enumerate(bone_names):
+            bone_links[name] = (lms_idx[k], lms_idx[k + 1])
+
+    lms_mean = load_landmarks(df, coordinate_scale(detect_coordinate_format(df))).mean(axis=0)
+    lms_mean = lms_mean - lms_mean[0]   # wrist at the origin
+
+    anatomy = {'lengths': {}, 'meta_vectors': {}}
+    for finger, (lms_idx, _) in FINGER_DEFS.items():
+        anatomy['meta_vectors'][finger] = lms_mean[lms_idx[0]]
     for bone_name, (idx1, idx2) in bone_links.items():
         anatomy['lengths'][bone_name] = np.linalg.norm(lms_mean[idx2] - lms_mean[idx1])
-        
     return anatomy
 
-# --- 3. FORWARD KINEMATICS CON BASE ANATOMICA ROBUSTA ---
+
+# --- Forward kinematics -----------------------------------------------------
 class CleanHandFK:
+    """24 joint angles (rad) -> 21 landmarks, using a calibrated anatomy."""
+
     def __init__(self, anatomy):
         self.anatomy = anatomy
         self.R_splay = {}
-        
-        # 1. Costruzione di un piano palmare rigoroso e indipendente dalla posa delle dita
-        v_idx = self.anatomy['meta_vectors']['Index']
-        v_pnk = self.anatomy['meta_vectors']['Pinky']
-        v_mid = self.anatomy['meta_vectors']['Middle']
-        
-        # Asse X globale del palmo (direzione Mignolo -> Indice)
-        X_palm = v_idx - v_pnk
+
+        # Palm frame that does not depend on the finger pose
+        v_idx = anatomy['meta_vectors']['Index']
+        v_pnk = anatomy['meta_vectors']['Pinky']
+        v_mid = anatomy['meta_vectors']['Middle']
+
+        X_palm = v_idx - v_pnk                      # pinky -> index
         X_palm /= (np.linalg.norm(X_palm) + 1e-8)
-        
-        # Normale del palmo (Z) perpendicolare al piano X-Medio
-        Z_palm = np.cross(X_palm, v_mid)
+        Z_palm = np.cross(X_palm, v_mid)            # palm normal
         Z_palm /= (np.linalg.norm(Z_palm) + 1e-8)
-        
-        # Asse Y globale del palmo (direzione di estensione)
-        Y_palm = np.cross(Z_palm, X_palm)
+        Y_palm = np.cross(Z_palm, X_palm)           # extension direction
         Y_palm /= (np.linalg.norm(Y_palm) + 1e-8)
-        
+
         for finger in ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky']:
-            Y_local = self.anatomy['meta_vectors'][finger].copy()
+            Y_local = anatomy['meta_vectors'][finger].copy()
             Y_local /= (np.linalg.norm(Y_local) + 1e-8)
-            
+
             if finger == 'Thumb':
-                # Pollice: l'asse di flessione (X) entra nel palmo
+                # Thumb: the flexion axis (X) points into the palm
                 X_local = Z_palm.copy()
                 Z_local = np.cross(X_local, Y_local)
                 Z_local /= (np.linalg.norm(Z_local) + 1e-8)
-                X_local = np.cross(Y_local, Z_local) 
+                X_local = np.cross(Y_local, Z_local)
             else:
-                # Dita standard
                 X_local = np.cross(Y_local, Z_palm)
                 if np.linalg.norm(X_local) < 1e-8:
-                    X_local = X_palm.copy() # Fallback sul piano del palmo
+                    X_local = X_palm.copy()
                 X_local /= np.linalg.norm(X_local)
                 Z_local = np.cross(X_local, Y_local)
                 Z_local /= np.linalg.norm(Z_local)
-                
+
             self.R_splay[finger] = np.column_stack([X_local, Y_local, Z_local])
 
     def forward(self, q):
         LMs = np.zeros((21, 3))
-        # FIX POLSO: Ordine Z-Y-X (Yaw, Pitch, Roll)
-        R_wrist = Rz(q[2]) @ Ry(q[1]) @ Rx(q[0])
-        LMs[0] = [0, 0, 0]
-        
-        finger_defs = {
-            'Index': (5, 6, 7, 8), 'Middle': (9, 10, 11, 12),
-            'Ring': (13, 14, 15, 16), 'Pinky': (17, 18, 19, 20)
-        }
-        
-        for idx, (f_name, lm_idx) in enumerate(finger_defs.items()):
-            q_idx = 8 + idx * 4
-            v_meta = self.anatomy['meta_vectors'][f_name]
-            LMs[lm_idx[0]] = R_wrist @ v_meta
-            
-            R_base = self.R_splay[f_name]
-            
-            R_mcp = R_wrist @ R_base @ Rx(q[q_idx]) @ Rz(q[q_idx+1])
-            v_prox = np.array([0, self.anatomy['lengths'][f_name+'_Proximal'], 0])
-            LMs[lm_idx[1]] = LMs[lm_idx[0]] + (R_mcp @ v_prox)
-            
-            R_pip = R_mcp @ Rx(q[q_idx+2])
-            v_inter = np.array([0, self.anatomy['lengths'][f_name+'_Intermediate'], 0])
-            LMs[lm_idx[2]] = LMs[lm_idx[1]] + (R_pip @ v_inter)
-            
-            R_dip = R_pip @ Rx(q[q_idx+3])
-            v_dist = np.array([0, self.anatomy['lengths'][f_name+'_Distal'], 0])
-            LMs[lm_idx[3]] = LMs[lm_idx[2]] + (R_dip @ v_dist)
+        R_wrist = Rz(q[2]) @ Ry(q[1]) @ Rx(q[0])    # Z-Y-X order (yaw, pitch, roll)
+        lengths = self.anatomy['lengths']
 
-        # Pollice
-        v_meta_t = self.anatomy['meta_vectors']['Thumb']
-        LMs[1] = R_wrist @ v_meta_t
-        R_base_t = self.R_splay['Thumb']
-        
-        R_cmc = R_wrist @ R_base_t @ Rx(q[3]) @ Rz(q[4]) 
-        v_prox_t = np.array([0, self.anatomy['lengths']['Thumb_Proximal'], 0])
-        LMs[2] = LMs[1] + (R_cmc @ v_prox_t)
-        
+        for idx, finger in enumerate(['Index', 'Middle', 'Ring', 'Pinky']):
+            lm_idx = FINGER_DEFS[finger][0]
+            q_idx = 8 + idx * 4
+            LMs[lm_idx[0]] = R_wrist @ self.anatomy['meta_vectors'][finger]
+
+            R_mcp = R_wrist @ self.R_splay[finger] @ Rx(q[q_idx]) @ Rz(q[q_idx + 1])
+            LMs[lm_idx[1]] = LMs[lm_idx[0]] + R_mcp @ np.array([0, lengths[finger + '_Proximal'], 0])
+            R_pip = R_mcp @ Rx(q[q_idx + 2])
+            LMs[lm_idx[2]] = LMs[lm_idx[1]] + R_pip @ np.array([0, lengths[finger + '_Intermediate'], 0])
+            R_dip = R_pip @ Rx(q[q_idx + 3])
+            LMs[lm_idx[3]] = LMs[lm_idx[2]] + R_dip @ np.array([0, lengths[finger + '_Distal'], 0])
+
+        # Thumb
+        LMs[1] = R_wrist @ self.anatomy['meta_vectors']['Thumb']
+        R_cmc = R_wrist @ self.R_splay['Thumb'] @ Rx(q[3]) @ Rz(q[4])
+        LMs[2] = LMs[1] + R_cmc @ np.array([0, lengths['Thumb_Proximal'], 0])
         R_mcp_t = R_cmc @ Rx(q[5]) @ Rz(q[6])
-        v_inter_t = np.array([0, self.anatomy['lengths']['Thumb_Intermediate'], 0])
-        LMs[3] = LMs[2] + (R_mcp_t @ v_inter_t)
-        
+        LMs[3] = LMs[2] + R_mcp_t @ np.array([0, lengths['Thumb_Intermediate'], 0])
         R_ip_t = R_mcp_t @ Rx(q[7])
-        v_dist_t = np.array([0, self.anatomy['lengths']['Thumb_Distal'], 0])
-        LMs[4] = LMs[3] + (R_ip_t @ v_dist_t)
-        
+        LMs[4] = LMs[3] + R_ip_t @ np.array([0, lengths['Thumb_Distal'], 0])
         return LMs
 
-# --- 4. IKA CON REGOLARIZZAZIONE BILANCIATA E SOFT-CONSTRAINTS ---
+
+# --- Inverse kinematics: per-finger SLSQP with soft constraints --------------
 class CleanHandIKA:
+    """Alternative IK solver: wrist first, then each finger, with regularization."""
+
     def __init__(self, fk_model):
         self.fk = fk_model
         self.num_dofs = 24
         self.q_current = np.zeros(self.num_dofs)
-        
         self.wrist_bounds = [(-1.5, 1.5)] * 3
         self.thumb_bounds = [(-1.0, 1.5), (-1.0, 1.0), (-0.5, 1.5), (-0.5, 0.5), (-0.5, 1.5)]
         self.finger_bounds = [(-0.5, 2.0), (-0.5, 0.5), (-0.2, 2.2), (-0.2, 1.8)]
 
     def enforce_rigid_skeleton(self, raw_targets):
-        """
-        Forza i landmark rumorosi di MediaPipe su uno scheletro rigido
-        usando le lunghezze esatte della calibrazione anatomica.
-        """
+        """Project noisy landmarks on a rigid skeleton with the calibrated lengths."""
         fixed_lms = np.zeros((21, 3))
-        fixed_lms[0] = raw_targets[0] # Il polso (origine) rimane fermo
-
-        finger_defs = {
-            'Thumb':  ([1, 2, 3, 4],    ['Thumb_Proximal', 'Thumb_Intermediate', 'Thumb_Distal']),
-            'Index':  ([5, 6, 7, 8],    ['Index_Proximal', 'Index_Intermediate', 'Index_Distal']),
-            'Middle': ([9, 10, 11, 12], ['Middle_Proximal', 'Middle_Intermediate', 'Middle_Distal']),
-            'Ring':   ([13, 14, 15, 16],['Ring_Proximal', 'Ring_Intermediate', 'Ring_Distal']),
-            'Pinky':  ([17, 18, 19, 20],['Pinky_Proximal', 'Pinky_Intermediate', 'Pinky_Distal'])
-        }
-
-        for finger, (lms_idx, bone_names) in finger_defs.items():
-            # 1. Sistema il Metacarpo (Dal polso LM 0 alla nocca)
+        fixed_lms[0] = raw_targets[0]
+        for finger, (lms_idx, bone_names) in FINGER_DEFS.items():
             mcp_idx = lms_idx[0]
             dir_meta = raw_targets[mcp_idx] - raw_targets[0]
             norm_meta = np.linalg.norm(dir_meta)
             if norm_meta > 1e-6:
                 dir_meta /= norm_meta
-            
-            # Recuperiamo la lunghezza reale del metacarpo calcolata in FK
-            len_meta = np.linalg.norm(self.fk.anatomy['meta_vectors'][finger])
-            fixed_lms[mcp_idx] = fixed_lms[0] + dir_meta * len_meta
+            fixed_lms[mcp_idx] = fixed_lms[0] + dir_meta * np.linalg.norm(self.fk.anatomy['meta_vectors'][finger])
 
-            # 2. Sistema le Falangi in cascata
             parent_idx = mcp_idx
             for i, child_idx in enumerate(lms_idx[1:]):
                 dir_bone = raw_targets[child_idx] - raw_targets[parent_idx]
                 norm_bone = np.linalg.norm(dir_bone)
-                if norm_bone > 1e-6:
-                    dir_bone /= norm_bone
-                else:
-                    dir_bone = np.array([0.0, 1.0, 0.0]) # Fallback di sicurezza
-                
-                # Applica la lunghezza ossea inattaccabile
-                len_bone = self.fk.anatomy['lengths'][bone_names[i]]
-                fixed_lms[child_idx] = fixed_lms[parent_idx] + dir_bone * len_bone
-                
-                parent_idx = child_idx # Propaga alla giuntura successiva
-                
+                dir_bone = dir_bone / norm_bone if norm_bone > 1e-6 else np.array([0.0, 1.0, 0.0])
+                fixed_lms[child_idx] = fixed_lms[parent_idx] + dir_bone * self.fk.anatomy['lengths'][bone_names[i]]
+                parent_idx = child_idx
         return fixed_lms
-    
 
     def solve(self, target_lms):
-        # 1. Centriamo il polso
-        wrist_pos = target_lms[0]
-        centered_targets = target_lms - wrist_pos
-        
-        # 2. AUTO-SCALING
+        centered_targets = target_lms - target_lms[0]
+
+        # Auto-scaling on the wrist -> middle MCP distance
         target_dist = np.linalg.norm(centered_targets[9])
         model_dist = np.linalg.norm(self.fk.anatomy['meta_vectors']['Middle'])
         if target_dist > 1e-6:
             centered_targets = centered_targets / (target_dist / model_dist)
-            
-        # 3. FILTRO STRUTTURALE INTERNO
         rigid_targets = self.enforce_rigid_skeleton(centered_targets)
-            
-        q_temp = np.copy(self.q_current)
-        lambda_reg = 100.0 
 
-        # =================================================================
-        # FASE 1: POLSO (Soglia Rescue in PIXEL)
-        # =================================================================
+        q_temp = np.copy(self.q_current)
+        lambda_reg = 100.0
+
+        # Phase 1: wrist, fitted on the palm landmarks
         def wrist_objective(q_wrist):
             q_test = np.copy(q_temp)
             q_test[0:3] = q_wrist
             pred = self.fk.forward(q_test)
             palm_lms = [1, 5, 9, 13, 17]
-            diff = pred[palm_lms] - rigid_targets[palm_lms]
-            mse = np.sum(np.linalg.norm(diff, axis=1)**2)
-            reg = lambda_reg * np.mean((q_wrist - self.q_current[0:3])**2)
-            return mse + reg
+            mse = np.sum(np.linalg.norm(pred[palm_lms] - rigid_targets[palm_lms], axis=1) ** 2)
+            return mse + lambda_reg * np.mean((q_wrist - self.q_current[0:3]) ** 2)
 
-        res_wrist = minimize(
-            fun=wrist_objective, x0=q_temp[0:3], method='SLSQP', bounds=self.wrist_bounds,
-            options={'ftol': 1e-5, 'maxiter': 50}
-        )
-        
-        # NUOVA SOGLIA: ~400 equivale a circa 9 pixel di errore medio per nocca.
+        opts = {'ftol': 1e-5, 'maxiter': 50}
+        res_wrist = minimize(wrist_objective, x0=q_temp[0:3], method='SLSQP',
+                             bounds=self.wrist_bounds, options=opts)
+        # Rescue from a neutral pose when the fit is poor (~9 px mean error per knuckle)
         if res_wrist.fun > 400.0:
-            res_wrist_rescue = minimize(
-                fun=wrist_objective, x0=np.zeros(3), method='SLSQP', bounds=self.wrist_bounds,
-                options={'ftol': 1e-5, 'maxiter': 50}
-            )
-            if res_wrist_rescue.fun < res_wrist.fun:
-                res_wrist = res_wrist_rescue
+            rescue = minimize(wrist_objective, x0=np.zeros(3), method='SLSQP',
+                              bounds=self.wrist_bounds, options=opts)
+            if rescue.fun < res_wrist.fun:
+                res_wrist = rescue
+        q_temp[0:3] = res_wrist.x
 
-        q_temp[0:3] = res_wrist.x 
-
-        # =================================================================
-        # FASE 2 & 3: DITA (Con Rescue Indipendente)
-        # =================================================================
+        # Phase 2: each finger independently
         finger_configs = {
-            'Thumb':  (3, 8,   [2, 3, 4], self.thumb_bounds),
-            'Index':  (8, 12,  [6, 7, 8], self.finger_bounds),
+            'Thumb':  (3, 8,   [2, 3, 4],    self.thumb_bounds),
+            'Index':  (8, 12,  [6, 7, 8],    self.finger_bounds),
             'Middle': (12, 16, [10, 11, 12], self.finger_bounds),
             'Ring':   (16, 20, [14, 15, 16], self.finger_bounds),
-            'Pinky':  (20, 24, [18, 19, 20], self.finger_bounds)
+            'Pinky':  (20, 24, [18, 19, 20], self.finger_bounds),
         }
-
         for finger, (start_idx, end_idx, lms_idx, bounds) in finger_configs.items():
             def finger_objective(q_finger):
                 q_test = np.copy(q_temp)
                 q_test[start_idx:end_idx] = q_finger
                 pred = self.fk.forward(q_test)
-                
                 weights = np.ones(len(lms_idx))
-                weights[-1] = 2.0 
-                
-                diff = pred[lms_idx] - rigid_targets[lms_idx]
-                mse = np.sum(weights * np.linalg.norm(diff, axis=1)**2)
-                
-                reg = lambda_reg * np.mean((q_finger - self.q_current[start_idx:end_idx])**2)
-                
-                bio_constraint = 0.0
-                if finger != 'Thumb':
-                    q_pip = q_finger[2]
-                    q_dip = q_finger[3]
-                    bio_constraint = 2000.0 * (q_dip - (0.66 * q_pip))**2
-                
-                return mse + reg + bio_constraint
+                weights[-1] = 2.0                  # fingertip counts double
+                mse = np.sum(weights * np.linalg.norm(pred[lms_idx] - rigid_targets[lms_idx], axis=1) ** 2)
+                reg = lambda_reg * np.mean((q_finger - self.q_current[start_idx:end_idx]) ** 2)
+                # Biomechanical coupling: DIP ~ 2/3 PIP
+                bio = 2000.0 * (q_finger[3] - 0.66 * q_finger[2]) ** 2 if finger != 'Thumb' else 0.0
+                return mse + reg + bio
 
-            res_finger = minimize(
-                fun=finger_objective, x0=q_temp[start_idx:end_idx], method='SLSQP',
-                bounds=bounds, options={'ftol': 1e-5, 'maxiter': 50}
-            )
-            
-            # NUOVO RESCUE PER LE DITA: ~300 equivale a circa 8-9 pixel di errore per falange
-            if res_finger.fun > 300.0:
-                res_finger_rescue = minimize(
-                    fun=finger_objective, x0=np.zeros(len(bounds)), method='SLSQP',
-                    bounds=bounds, options={'ftol': 1e-5, 'maxiter': 50}
-                )
-                if res_finger_rescue.fun < res_finger.fun:
-                    res_finger = res_finger_rescue
-
-            q_temp[start_idx:end_idx] = res_finger.x 
+            res_finger = minimize(finger_objective, x0=q_temp[start_idx:end_idx], method='SLSQP',
+                                  bounds=bounds, options=opts)
+            if res_finger.fun > 300.0:             # ~8-9 px error per phalanx
+                rescue = minimize(finger_objective, x0=np.zeros(len(bounds)), method='SLSQP',
+                                  bounds=bounds, options=opts)
+                if rescue.fun < res_finger.fun:
+                    res_finger = rescue
+            q_temp[start_idx:end_idx] = res_finger.x
 
         self.q_current = q_temp
         return self.q_current
 
 
-# --- 4. SOLUTORE IK ROBOTICO (Damped Least Squares Jacobian) ---
+# --- Inverse kinematics: damped least squares Jacobian (used by the pipeline) --
 class JacobianIKA:
     def __init__(self, fk_model):
         self.fk = fk_model
         self.num_dofs = 24
         self.q_current = np.zeros(self.num_dofs)
-        self.lambda_dls = 0.5  # Fattore di smorzamento: impedisce alla matematica di esplodere vicino alle singolarità
-        
-        # Pesi Biomeccanici: Diamo priorità assoluta al posizionamento del palmo, poi alle punte.
-        # Le articolazioni intermedie si adatteranno fluidamente lungo la catena.
+        self.lambda_dls = 0.5   # damping: keeps the update bounded near singularities
+
+        # Biomechanical weights: the palm must match first, then the fingertips;
+        # intermediate joints adapt along the chain.
         weights = np.ones(21)
-        palm_idx = [0, 1, 5, 9, 13, 17]
-        tips_idx = [4, 8, 12, 16, 20]
-        weights[palm_idx] = 10.0  # Il polso è la fondazione, deve combaciare perfettamente
-        weights[tips_idx] = 3.0   # Le punte guidano la direzione
-        self.W = np.diag(np.repeat(weights, 3)) # Creiamo la matrice diagonale 63x63
+        weights[[0, 1, 5, 9, 13, 17]] = 10.0
+        weights[[4, 8, 12, 16, 20]] = 3.0
+        self.W = np.diag(np.repeat(weights, 3))   # 63 x 63
 
     def get_jacobian(self, q):
-        # Calcolo del Jacobiano Numerico (Derivate parziali per ogni grado di libertà)
+        """Numerical Jacobian of the FK (63 x 24) and the current FK output."""
         delta = 1e-4
         J = np.zeros((63, self.num_dofs))
         f0 = self.fk.forward(q).flatten()
-        
         for i in range(self.num_dofs):
             q_step = np.copy(q)
             q_step[i] += delta
-            f_step = self.fk.forward(q_step).flatten()
-            J[:, i] = (f_step - f0) / delta
-            
+            J[:, i] = (self.fk.forward(q_step).flatten() - f0) / delta
         return J, f0
 
     def solve(self, target_lms, iterations=20):
-        # 1. Centratura
-        wrist_pos = target_lms[0]
-        centered_targets = target_lms - wrist_pos
-        
-        # 2. Auto-scaling sulle proporzioni fisse
+        centered_targets = target_lms - target_lms[0]
         target_dist = np.linalg.norm(centered_targets[9])
         model_dist = np.linalg.norm(self.fk.anatomy['meta_vectors']['Middle'])
         if target_dist > 1e-6:
             centered_targets = centered_targets / (target_dist / model_dist)
-            
+
         target_flat = centered_targets.flatten()
-        q = np.copy(self.q_current)
-        
-        # 3. Ottimizzazione DLS (Levenberg-Marquardt Approach)
+        q = np.copy(self.q_current)   # warm start from the previous frame
+
         for step in range(iterations):
-            # Calcoliamo dove siamo e come muoverci (Jacobiano)
-            J, current_pos_flat = self.get_jacobian(q)
-            error = target_flat - current_pos_flat
-            
-            # Se l'errore è irrilevante, interrompiamo il calcolo per risparmiare tempo
-            if np.mean(np.abs(error)) < 0.5: 
+            J, current = self.get_jacobian(q)
+            error = target_flat - current
+            if np.mean(np.abs(error)) < 0.5:
                 break
-            
-            # Applichiamo i pesi biomeccanici
-            e_weighted = self.W @ error
-            J_weighted = self.W @ J
-            
-            # Calcolo della pseudo-inversa smorzata: (J^T * J + lambda^2 * I)^-1 * J^T
-            J_T = J_weighted.T
-            H = J_T @ J_weighted + (self.lambda_dls**2) * np.eye(self.num_dofs)
-            
-            # La magia della robotica: delta_q contiene i radianti esatti per abbattere l'errore
-            delta_q = np.linalg.inv(H) @ J_T @ e_weighted
-            
-            # Aggiorniamo gli angoli della mano (con un passo di 0.8 per evitare oscillazioni)
-            q = q + 0.8 * delta_q 
-            
-            # Reset di sicurezza: se al primo iteratore la mano è capovolta (errore enorme),
-            # azzeriamo il polso per permettere al Jacobiano di trovare la discesa giusta.
-            if step == 0 and np.mean(np.abs(e_weighted)) > 150.0:
-                q[0:3] = 0.0 
+
+            e_w = self.W @ error
+            J_w = self.W @ J
+            # Damped pseudo-inverse: (J^T J + lambda^2 I)^-1 J^T e
+            H = J_w.T @ J_w + (self.lambda_dls ** 2) * np.eye(self.num_dofs)
+            q = q + 0.8 * (np.linalg.inv(H) @ J_w.T @ e_w)   # step 0.8 avoids oscillations
+
+            # If the first iteration finds a flipped hand, reset the wrist
+            if step == 0 and np.mean(np.abs(e_w)) > 150.0:
+                q[0:3] = 0.0
 
         self.q_current = q
         return q
-# ==========================================
-# TEST 2: TRACKING CONTINUO SUI DATI REALI
-# ==========================================
-if __name__ == "__main__":
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    KIN_FILE = os.path.join(BASE_DIR, "recordings", "trial_1_Kinematics.csv") 
-    
-    START_CALIB = 1530
-    END_CALIB = 1700
-    
-    CALIB_FILE = os.path.join(BASE_DIR, "hand_calibration.pt")
-    
-    # 1. Estraiamo o carichiamo l'anatomia
-    if os.path.exists(CALIB_FILE):
-        print(f"Caricamento calibrazione anatomica esistente da: {os.path.basename(CALIB_FILE)}")
-        anatomy = torch.load(CALIB_FILE, weights_only=False)
-    else:
-        print("Calcolo della calibrazione anatomica dal file CSV...")
-        anatomy = extract_anatomy_from_csv(KIN_FILE, START_CALIB, END_CALIB)
-        torch.save(anatomy, CALIB_FILE)
-        print(f"Calibrazione anatomica salvata in: {os.path.basename(CALIB_FILE)}")
-    
-    df_orig = pd.read_csv(KIN_FILE)
-    num_frames = len(df_orig)
-    
-    is_metric = detect_coordinate_format(df_orig)
-    if is_metric:
-        SCALE_X = SCALE_Y = SCALE_Z = 1000.0
-        unit = "mm"
-    else:
-        SCALE_X, SCALE_Y, SCALE_Z = 640.0, 480.0, 640.0
-        unit = "px"
-
-    # 1. Preparazione Dati Grezzi
-    raw_landmarks_array = np.zeros((num_frames, 21, 3))
-    for f in range(num_frames):
-        row = df_orig.iloc[f]
-        for i in range(21):
-            raw_landmarks_array[f, i] = [
-                row[f'LM_{i}_X'] * SCALE_X, 
-                row[f'LM_{i}_Y'] * SCALE_Y, 
-                row[f'LM_{i}_Z'] * SCALE_Z
-            ]
-
-    # 2. Preparazione Dati Preprocessati
-    cleaned_landmarks_array = preprocess_mediapipe_data(KIN_FILE, anatomy)
-    
-    fk = CleanHandFK(anatomy)
-    
-    # ==========================================
-    # TEST IKA: DATI GREZZI VS PREPROCESSATI
-    # ==========================================
-    print(f"\n--- AVVIO TRACKING IKA SUI DATI GREZZI ---")
-    ika_raw = JacobianIKA(fk)
-    all_lms_errors_raw = np.zeros((num_frames, 21))
-    mean_errors_raw = np.zeros(num_frames)
-    
-    for f in range(num_frames):
-        target_lms = raw_landmarks_array[f].copy()
-        target_lms = target_lms - target_lms[0].copy()
-        
-        q_sol = ika_raw.solve(target_lms)
-        pred_lms = fk.forward(q_sol)
-        error_val = np.linalg.norm(target_lms - pred_lms, axis=1)
-        
-        all_lms_errors_raw[f, :] = error_val
-        mean_errors_raw[f] = np.mean(error_val)
-        
-        if f % 100 == 0:
-            print(f"Frame {f:04d}/{num_frames} | Errore Medio Grezzi: {mean_errors_raw[f]:.2f} {unit}")
-            
-    print(f"Errore Medio Globale (Grezzi): {np.mean(mean_errors_raw):.2f} {unit}")
-
-    print(f"\n--- AVVIO TRACKING IKA SUI DATI PREPROCESSATI ---")
-    ika_clean = JacobianIKA(fk)
-    all_lms_errors_clean = np.zeros((num_frames, 21))
-    mean_errors_clean = np.zeros(num_frames)
-    max_errors_clean = np.zeros(num_frames)
-    ika_pred_data = []
-    
-    for f in range(num_frames):
-        target_lms = cleaned_landmarks_array[f].copy()
-        wrist_pos = target_lms[0].copy()
-        target_lms = target_lms - wrist_pos # Centriamo il polso
-        
-        q_sol = ika_clean.solve(target_lms)
-        
-        # Log di controllo
-        pred_lms = fk.forward(q_sol)
-        error_val = np.linalg.norm(target_lms - pred_lms, axis=1)
-        all_lms_errors_clean[f, :] = error_val
-        mean_errors_clean[f] = np.mean(error_val)
-        max_errors_clean[f] = np.max(error_val)
-        
-        # Riportiamo la mano nella posizione originale nello schermo per l'animazione
-        pred_lms_abs = pred_lms + wrist_pos
-        
-        # Prepariamo la riga per il nuovo CSV convertendo di nuovo in scala normalizzata
-        row_dict = {}
-        if 'Timestamp_LSL' in df_orig.columns:
-            row_dict['Timestamp_LSL'] = df_orig.iloc[f]['Timestamp_LSL']
-        for i in range(21):
-            row_dict[f'LM_{i}_X'] = pred_lms_abs[i, 0] / SCALE_X
-            row_dict[f'LM_{i}_Y'] = pred_lms_abs[i, 1] / SCALE_Y
-            row_dict[f'LM_{i}_Z'] = pred_lms_abs[i, 2] / SCALE_Z
-        ika_pred_data.append(row_dict)
-        
-        if f % 100 == 0:
-            print(f"Frame {f:04d}/{num_frames} | Errore Medio Preprocessati: {mean_errors_clean[f]:.2f} {unit} | Errore Max: {max_errors_clean[f]:.2f} {unit}")
-            
-    print(f"\nElaborazione completata. Errore Medio Globale (Preprocessati): {np.mean(mean_errors_clean):.2f} {unit}")
-
-    # Salvataggio del nuovo CSV
-    df_ika_pred = pd.DataFrame(ika_pred_data)
-    out_csv = KIN_FILE.replace('.csv', '_IKA_predicted_lms.csv')
-    df_ika_pred.to_csv(out_csv, index=False)
-    print(f"Predizioni IKA salvate per l'animazione in: {os.path.basename(out_csv)}\n")
-
-    # ==========================================
-    # PLOTTING DEI RISULTATI
-    # ==========================================
-    eval_dir = os.path.join(BASE_DIR, "eval")
-    os.makedirs(eval_dir, exist_ok=True)
-    
-    # 1. Plot dell'errore nel tempo (Preprocessati)
-    plt.figure(figsize=(12, 6))
-    frames = np.arange(num_frames)
-    plt.plot(frames, mean_errors_clean, label=f'Errore Medio ({unit})', color='blue')
-    plt.plot(frames, max_errors_clean, label=f'Errore Massimo per frame ({unit})', color='red', alpha=0.3)
-    plt.axhline(y=np.mean(mean_errors_clean), color='green', linestyle='--', label=f'Media Globale ({np.mean(mean_errors_clean):.2f} {unit})')
-    
-    plt.title(f'Errore di Ricostruzione IKA nel tempo (Dati Preprocessati)\nFile: {os.path.basename(KIN_FILE)}')
-    plt.xlabel('Frame')
-    plt.ylabel(f'Errore ({unit})')
-    plt.legend()
-    plt.grid(True, linestyle=':', alpha=0.7)
-    plt.tight_layout()
-    
-    timeplot_filename = os.path.join(eval_dir, f"error_time_preprocessati_{os.path.basename(KIN_FILE).replace('.csv', '.png')}")
-    plt.savefig(timeplot_filename, dpi=300)
-    
-    # 2. Plot dell'errore nel tempo (Confronto Medie)
-    plt.figure(figsize=(12, 6))
-    plt.plot(frames, mean_errors_raw, label=f'Errore Medio Grezzi', color='#ff9999', alpha=0.8)
-    plt.plot(frames, mean_errors_clean, label=f'Errore Medio Preprocessati', color='#99ccff', linewidth=2)
-    plt.axhline(y=np.mean(mean_errors_raw), color='#cc0000', linestyle='--', label=f'Media Grezzi ({np.mean(mean_errors_raw):.2f} {unit})')
-    plt.axhline(y=np.mean(mean_errors_clean), color='#0000cc', linestyle='--', label=f'Media Preproc ({np.mean(mean_errors_clean):.2f} {unit})')
-    
-    plt.title(f'Confronto Errore di Ricostruzione IKA nel tempo\nFile: {os.path.basename(KIN_FILE)}')
-    plt.xlabel('Frame')
-    plt.ylabel(f'Errore ({unit})')
-    plt.legend()
-    plt.grid(True, linestyle=':', alpha=0.7)
-    plt.tight_layout()
-    
-    timeplot_comp_filename = os.path.join(eval_dir, f"error_time_confronto_{os.path.basename(KIN_FILE).replace('.csv', '.png')}")
-    plt.savefig(timeplot_comp_filename, dpi=300)
-
-    # 3. Box plot compattato (Confronto per singolo Landmark) con asse spezzato
-    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(15, 6), gridspec_kw={'height_ratios': [1, 3]})
-    fig.subplots_adjust(hspace=0.05)
-    
-    positions_raw = np.arange(21) * 2.0 - 0.4
-    positions_clean = np.arange(21) * 2.0 + 0.4
-    
-    for ax in [ax1, ax2]:
-        ax.boxplot(all_lms_errors_raw, positions=positions_raw, widths=0.6, patch_artist=True,
-                   boxprops=dict(facecolor="#ff9999", color="#cc0000"),
-                   medianprops=dict(color="#cc0000", linewidth=2),
-                   flierprops={'marker': 'o', 'markersize': 3, 'alpha': 0.3, 'markeredgecolor': '#cc0000'})
-                             
-        ax.boxplot(all_lms_errors_clean, positions=positions_clean, widths=0.6, patch_artist=True,
-                   boxprops=dict(facecolor="#99ccff", color="#0000cc"),
-                   medianprops=dict(color="#0000cc", linewidth=2),
-                   flierprops={'marker': 'o', 'markersize': 3, 'alpha': 0.3, 'markeredgecolor': '#0000cc'})
-                           
-    ax1.set_ylim(80, 130)
-    ax2.set_ylim(0, 30)
-
-    ax1.spines['bottom'].set_visible(False)
-    ax2.spines['top'].set_visible(False)
-    ax1.tick_params(labelbottom=False)
-    ax2.xaxis.tick_bottom()
-
-    d = .015  
-    kwargs = dict(transform=ax1.transAxes, color='k', clip_on=False)
-    ax1.plot((-d, +d), (-d, +d), **kwargs)       
-    ax1.plot((1 - d, 1 + d), (-d, +d), **kwargs) 
-
-    kwargs.update(transform=ax2.transAxes)  
-    ax2.plot((-d, +d), (1 - d, 1 + d), **kwargs)  
-    ax2.plot((1 - d, 1 + d), (1 - d, 1 + d), **kwargs)  
-    
-    ax2.set_xticks(np.arange(21) * 2.0)
-    ax2.set_xticklabels([f'LM_{i}' for i in range(21)], rotation=45)
-    
-    ax1.set_title(f'Distribuzione dell\'Errore per singolo Landmark (Grezzi vs Preprocessati)\nFile: {os.path.basename(KIN_FILE)}')
-    ax2.set_xlabel('Landmark')
-    fig.text(0.04, 0.5, f'Errore ({unit})', va='center', rotation='vertical', fontsize=12)
-    
-    import matplotlib.patches as mpatches
-    legend_elements = [
-        mpatches.Patch(facecolor='#ff9999', edgecolor='#cc0000', label='Dati Grezzi'),
-        mpatches.Patch(facecolor='#99ccff', edgecolor='#0000cc', label='Dati Preprocessati')
-    ]
-    ax1.legend(handles=legend_elements, loc='upper right')
-    ax1.grid(True, linestyle=':', alpha=0.7, axis='y')
-    ax2.grid(True, linestyle=':', alpha=0.7, axis='y')
-    
-    boxplot_comp_filename = os.path.join(eval_dir, f"boxplot_confronto_{os.path.basename(KIN_FILE).replace('.csv', '.png')}")
-    plt.savefig(boxplot_comp_filename, dpi=300, bbox_inches='tight')
-    
-    print(f"Tutti i grafici di confronto sono stati salvati nella cartella: {eval_dir}")
-    
-    plt.show()
 
 
-# FUNZIONE FINALE PER FEATURE EXTRACTION
-def process_full_kinematics_core(csv_path):
-    print("Avvio Pipeline Preprocessing + IKA (Jacobian)...")
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    CALIB_FILE = os.path.join(BASE_DIR, "hand_calibration.pt")
-    
-    if os.path.exists(CALIB_FILE):
-        print(f"Caricamento calibrazione anatomica da: {os.path.basename(CALIB_FILE)}")
-        anatomy = torch.load(CALIB_FILE, weights_only=False)
-    else:
-        print(f"Errore: File di calibrazione '{CALIB_FILE}' non trovato!")
+def load_calibration(calib_file=config.HAND_CALIBRATION_FILE):
+    if not calib_file.exists():
+        print(f"Error: hand calibration '{calib_file}' not found!")
         return None
-    
-    # 1. Preprocessing (Pulizia e Rigidità)
-    cleaned_landmarks_array = preprocess_mediapipe_data(csv_path, anatomy)
+    print(f"Loading hand calibration from {calib_file.name}")
+    return torch.load(calib_file, weights_only=False)
+
+
+def process_full_kinematics_core(csv_path, calib_file=config.HAND_CALIBRATION_FILE):
+    """Preprocessing + Jacobian IK on a landmark CSV -> ``<csv>_core_IKA_24DoF.csv`` (degrees)."""
+    print("Running preprocessing + inverse kinematics (Jacobian)...")
+    anatomy = load_calibration(calib_file)
+    if anatomy is None:
+        return None
+
+    cleaned = preprocess_mediapipe_data(csv_path, anatomy)
     df_orig = pd.read_csv(csv_path)
-    
-    # 2. IKA
-    fk = CleanHandFK(anatomy)
-    ika = JacobianIKA(fk)
-    
-    num_frames = len(cleaned_landmarks_array)
-    angles_data = []
-    
-    print(f"\n--- AVVIO TRACKING IKA SUI DATI PREPROCESSATI ---")
-    
+    ika = JacobianIKA(CleanHandFK(anatomy))
+
+    num_frames = len(cleaned)
+    angles = np.zeros((num_frames, 24))
+    print("\n--- Inverse kinematics on the preprocessed landmarks ---")
     for f in range(num_frames):
-        target_lms = cleaned_landmarks_array[f].copy()
-        wrist_pos = target_lms[0].copy()
-        target_lms = target_lms - wrist_pos # Centriamo il polso
-        
-        q_sol = ika.solve(target_lms)
-        
-        row_dict = {}
-        if 'Timestamp_LSL' in df_orig.columns:
-            row_dict['Timestamp_LSL'] = df_orig.iloc[f]['Timestamp_LSL']
-            
-        for i in range(24):
-            row_dict[f'DoF_{i}'] = np.degrees(q_sol[i]) # Feature extractor si aspetta gradi
-            
-        angles_data.append(row_dict)
-        
+        target = cleaned[f] - cleaned[f, 0]   # wrist at the origin
+        angles[f] = np.degrees(ika.solve(target))
         if f % 100 == 0 and f > 0:
-            print(f"Processati {f:04d}/{num_frames} frame per IKA...")
-            
-    df_angles = pd.DataFrame(angles_data)
-    out_csv = csv_path.replace('.csv', '_core_IKA_24DoF.csv')
+            print(f"IK: {f:04d}/{num_frames} frames")
+
+    df_angles = pd.DataFrame(angles, columns=[f'DoF_{i}' for i in range(24)])
+    if 'Timestamp_LSL' in df_orig.columns:
+        df_angles.insert(0, 'Timestamp_LSL', df_orig['Timestamp_LSL'].values)
+    out_csv = str(csv_path).replace('.csv', '_core_IKA_24DoF.csv')
     df_angles.to_csv(out_csv, index=False)
-    print(f"Dati IKA (Gradi) salvati in: {os.path.basename(out_csv)}\n")
-    return out_csv
+    print(f"24-DoF angles (degrees) saved to: {out_csv.split('/')[-1]}\n")
+    return df_angles

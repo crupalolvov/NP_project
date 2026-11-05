@@ -1,159 +1,214 @@
-# 🦾 NP_project: HD-EMG & Kinematics Acquisition Pipeline
+# EMG-to-Hand: Continuous Hand Pose Decoding from HD-EMG
 
-Benvenuto in **NP_project** (Neural Prostheses Project). Questa repository contiene una suite software avanzata per l'acquisizione sincronizzata, il filtraggio in tempo reale e l'elaborazione offline di segnali EMG a media densità (MD-EMG) e dati cinematici della mano. 
+**Decoding 24 degrees of freedom of the human hand from forearm muscle activity, using a webcam as the only source of ground truth.**
 
-Il sistema è concepito per la ricerca nell'ambito delle **Protesi Neurali**, con l'obiettivo ultimo di fornire dataset multimodali di altissima qualità necessari per l'addestramento di modelli di **regressione continua**. Tali modelli permetteranno di decodificare i pattern mioelettrici e tradurli in coordinate spaziali 3D (o angoli articolari), garantendo un controllo proporzionale e naturale degli attuatori bionici / prototipi virtuali.
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-deep%20learning-EE4C2C?logo=pytorch&logoColor=white)
+![MediaPipe](https://img.shields.io/badge/MediaPipe-hand%20tracking-0097A7)
+![LSL](https://img.shields.io/badge/Lab%20Streaming%20Layer-sync-6A5ACD)
+![Optuna](https://img.shields.io/badge/Optuna-HPO-2C5BB4)
 
----
+This is an end-to-end research pipeline for **myoelectric control of hand prostheses**. It records 32-channel
+high-density surface EMG together with markerless 3D hand tracking, converts the noisy video landmarks into
+biomechanically valid joint angles, and trains a neural network (**RPC-Net**) that predicts the full hand pose
+continuously and proportionally from muscle activity alone.
 
-## 🎯 Architettura del Sistema
+Developed for the *Neural Prostheses* project at **Scuola Superiore Sant'Anna** and the **University of Pisa** (2026).
 
-L'infrastruttura di acquisizione sfrutta il protocollo **LSL (Lab Streaming Layer)** per gestire il time-stamping ad alta precisione e risolvere nativamente il problema della sincronizzazione tra flussi di dati eterogenei e a frequenze di campionamento asimmetriche (es. EMG a 2000 Hz vs Webcam a ~30 Hz).
-
-La pipeline si articola nei seguenti moduli core:
-
-### 1. 📡 Acquisizione e Filtraggio HD-EMG (`Read64_32ch.py` & `communication_sessantaquattro.py`)
-Questi moduli gestiscono l'interfacciamento TCP/IP a basso livello con il dispositivo **OTBioelettronica Sessantaquattro**. Implementano una robusta elaborazione del segnale digitale in tempo reale:
-- **Protocollo di Comunicazione:** Decodifica esatta dei pacchetti binari del dispositivo per l'estrazione di 32 canali attivi.
-- **Filtraggio IIR:** Implementazione di un passa-banda (20-450 Hz) in cascata strutturato in *Second-Order Sections* (SOS) per garantire stabilità matematica , unito a una batteria di filtri Notch (50, 100, 150 Hz) per l'abbattimento delle interferenze di rete.
-- **Interfaccia Grafica (GUI):** Visualizzazione multi-thread ad alte prestazioni basata su `PyQt5` e `pyqtgraph`. Include una vista *Multiplot* unificata e viste a *Canale Singolo* (attivabili premendo `S`).
-- **Streaming LSL:** Immette nella rete locale i segnali bioelettrici puliti (`OTB_S64_EMG`).
-
-> *Nota:* Oltre a `Read64_32ch.py`, la suite include `Read64_2ch.py` (per setup a canali ridotti).
-
-### 2. 📷 Estrazione Cinematica (`kinematic_LSL.py`)
-Sfrutta la Computer Vision e i modelli predittivi di **Google MediaPipe** per l'inferenza spaziale:
-- **Acquisizione:** Elabora il feed video della webcam in tempo reale (asincrono).
-- **Estrazione:** Identifica le topologie della mano ricavando le coordinate 3D dei 21 landmark anatomici.
-- **Streaming LSL:** Trasmette in rete un array in flattening di 63 feature (X, Y, Z per ogni giunto) sotto l'identificativo `MediaPipe_Kinematics`.
-
-### 3. ⏱️ Data Logging e Sincronizzazione (`record_LSL.py`)
-Nodo di archiviazione centrale responsabile della generazione dei dataset:
-- **Aggancio degli Stream:** Si connette dinamicamente agli stream EMG e Cinematici sulla rete LSL.
-- **Pulling Asincrono:** Recupera "chunks" di dati garantendo il non-blocco dei thread (essenziale ad alte frequenze).
-- **Strutturazione Dataset:** Concatena i dati su DataFrame e li esporta generando coppie di file `.csv` (`_EMG` e `_Kinematics`), condividendo la medesima base temporale ad alta risoluzione (`Timestamp_LSL`).
-
-
-### 4. 🗃️ Estrazione Feature e Creazione Tensori (`feature_ext.py`)
-Elabora i dataset LSL grezzi generando i tensori PyTorch finali (Z-score standardized) pronti per l'addestramento.
-- **Processing EMG:** Sottrazione della DC offset per singolo canale, filtraggio IIR passa-banda (20-450 Hz) + Notch (50, 100, 150 Hz), rettificazione e finestratura scorrevole per estrazione RMS (finestra 100ms, step 12.5ms → decima la frequenza a ~80 Hz).
-- **Processing Cinematica:** Interpolazione lineare della cinematica per combaciare rigorosamente con l'asse temporale decimato dell'EMG (80 Hz). Estrazione automatica della cinematica inversa (IKA) tramite `core_kin.py` se il dato d'ingresso è spaziale. Calcolo rest-angles e normalizzazione `[-150°, 90°] → [0, 1]`.
-- **Struttura Tensoriale:** Implementa il mapping storico per network densi. Da una finestra di 64 campioni (0.8s) applica sottocampionamento asimmetrico: 1:4 per l'EMG (genera array piatto 16 step x 32 canali = 512) e 1:8 per gli angoli storici (8 step x 24 DoF = 192). Esporta statistiche globali (media/varianza) ed i file `.pt` (`train_tensors.pt`, `val_tensors.pt`, `test_tensors.pt`).
-
-### 5. 🔍 Ottimizzazione Iperparametri (`RPC_optuna.py`)
-Implementa la ricerca Bayesiana degli iperparametri (HPO) della rete sfruttando il framework **Optuna**.
-- **Spazio di Ricerca (Search Space):** Ottimizzazione continua di *Learning Rate*, *Weight Decay*, *Batch Size* (categorico: 16, 32, 64, 128) e coefficiente *Epsilon* dell'ottimizzatore Adam.
-- **Efficienza Computazionale:** Utilizza `MedianPruner` per fermare precocemente le configurazioni stocastiche che presentano una perdita di validazione peggiore rispetto alla mediana dei trial storici.
-- **Output:** I parametri ottimali vengono iniettati in `best_hyperparameters.json` (che la rete caricherà in override). Genera automaticamente un report analitico interattivo in HTML per valutare la sensibilità del modello (`optuna_optimization_history.html`, `optuna_param_importances.html`, `optuna_slice_plot.html`).
-
-### 6. 🧠 Training RPC-Net (`train_RPC.py`)
-Inizializza, addestra e valida l'architettura neurale RPC-Net (Regressione Proporzionale Continua).
-- **Architettura:** Implementazione hard-coded dell'architettura parallela esatta (`RPCNet_Exact` definita in `RPC_Net.py`). Concatena i due rami di embedding (EMG ed Angoli passati) in un layer fully connected finale a 24 testine (per ogni DoF).
-- **Protocollo di Addestramento:** Caricamento dei tensori in memoria, auto-acquisizione dell'HPS in formato JSON. Implementa *Early Best Checkpoint* per sovrascrivere `rpc_net_weights.pth` minimizzando la Validation Loss globale (MSE).
-- **Output:** Stampa la loss cross-epocale a video e salva la curva di apprendimento `loss_convergence.png`.
-
-### 7. 🔮 Inferenza e Decodifica Offline (`inference.py`)
-Script di test diagnostico. Simula il comportamento causale della RPC-Net in ambiente real-time scorrendo array storici ad altissima risoluzione temporale su trial unseen.
-- **Domain Adaptation (Z-Score Locale):** Normalizza i buffer EMG utilizzando la media e deviazione standard del trial target anziché le globali estratte in fase di train. Questo stabilizza la predizione contro le severe fluttuazioni di conduttanza elettrodo-pelle (shift di impedenza tra sessioni/sensori).
-- **Smoothing Causale:** Post-elaborazione delle traiettorie angolari predette utilizzando un filtro passa-basso ricorsivo unidirezionale Butterworth (4° ordine).
-- **Decodifica Forward Kinematics (FK):** Attraverso la topologia ossea calibrata (`hand_calibration.pt`), inverte i 24 angoli articolari riconvertendoli in 21 Landmark Metrici 3D nello spazio globale (`_lms.csv`).
-
-### 8. 🎞️ Animazione e Analisi Visuale 3D (`animate_raw_kinematics.py`)
-Strumento di debug per la diagnostica della cinematica umana rigida, predetta e cruda (Ground Truth vs Predetto).
-- **Rendering Multiplo:** Ingesta simultaneamente multipli `.csv` tridimensionali. Resampla il tutto in sincronia perfetta a una frequenza bersaglio comune (es. 25-80 Hz).
-- **Compensazione Offset Spaziale:** Applica una traslazione forzata, azzerando le coordinate del polso all'origine per tutti i modelli, sovrapponendoli per separazione orizzontale in un'unica griglia isometrica di comparazione visiva.
-- **Animazione Interattiva:** Gestisce polilinee, triangolazioni e nodi sparsi in `matplotlib.animation` sfruttando keyframe temporali per il monitoraggio analitico delle discrepanze o violazioni ROM.
-
-### 9. 🛠️ Strumenti di Calibrazione e Diagnostica (Utility)
-La suite è corredata da script di utility per garantire la robustezza biomeccanica e la validazione della qualità dei segnali:
-- **`check_MP_variance.py`:** Strumento diagnostico che valuta la varianza e l'errore delle lunghezze ossee estratte da MediaPipe. Giustifica la necessità di forzare uno scheletro rigido in fase di pre-processing.
-- **`plot_emg_spectrum.py`:** Analizzatore spettrale offline. Genera grafici comparativi ad alta risoluzione (PSD e Spettrogrammi) per confrontare i segnali EMG raw con quelli filtrati e verificare la correttezza del filtraggio (es. efficacia dei filtri Notch a 50Hz).
-- **`IKA.py` / `core_kin.py`:** Contengono i core matematici per la risoluzione della Cinematica Inversa. Utilizzano ottimizzatori Jacobiani (Damped Least Squares) e vincoli di Range of Motion (ROM) per convertire le stime rumorose in coordinate continue a 24 DoF, rispettando la topologia e i limiti articolari reali della mano.
+<p align="center">
+  <img src="results/figures/tracking_trial_6.png" width="100%" alt="Predicted vs ground-truth joint angles for the 24 DoF on an unseen trial">
+  <br><em>RPC-Net estimate (orange) vs ground truth (blue, dashed) for all 24 DoF on an unseen test trial.
+  Background colours mark the performed gestures.</em>
+</p>
 
 ---
 
-## Requisiti e Installazione
+## Highlights
 
-L'ambiente richiede Python 3.10+. Per installare l'intero stack di dipendenze matematiche, di visione e di rete:
+- **Full-stack pipeline**: hardware driver → real-time DSP → synchronized recording → biomechanical modelling → deep learning → evaluation.
+- **Custom driver** for the OT Bioelettronica *Sessantaquattro* amplifier (TCP binary protocol, 32 ch @ 2 kHz), with a multi-threaded PyQt5 real-time viewer.
+- **Synchronization** of 2 kHz EMG and ~30 Hz video on a shared Lab Streaming Layer (LSL) clock. Video frames are stamped when they are captured, not when inference finishes.
+- **Low-cost ground truth**: a webcam and MediaPipe replace a motion-capture lab.
+- **Biomechanical hand model**: subject calibration, forward kinematics and Jacobian (damped least-squares) inverse kinematics enforce a rigid skeleton and anatomical range of motion. This cuts the reconstruction error from **6.2 mm to 1.3 mm**.
+- **RPC-Net** re-implemented from the literature: 24 parallel sub-networks fed by EMG history and their own past predictions (autoregressive), tuned with **Bayesian optimization (Optuna)**.
+- **Realistic evaluation**: causal, sample-by-sample decoding on unseen trials, with per-trial EMG normalization to compensate for electrode-skin impedance drift.
+
+---
+
+## Pipeline
+
+```mermaid
+flowchart LR
+    subgraph ACQ["1 - Acquisition (real time)"]
+        S64["Sessantaquattro<br/>32-ch HD-EMG, 2 kHz"] -->|TCP| EMG["emg_stream_32ch<br/>filtering + viewer"]
+        CAM["Webcam"] --> MP["hand_tracking_stream<br/>MediaPipe, 21 landmarks"]
+        EMG -->|LSL| REC["record_session"]
+        MP -->|LSL| REC
+    end
+    subgraph PROC["2 - Processing"]
+        REC --> KIN["hand_kinematics<br/>rigid skeleton + IK, 24 DoF"]
+        REC --> FE["feature_extraction<br/>RMS envelope, 80 Hz"]
+        KIN --> FE
+    end
+    subgraph ML["3 - Learning"]
+        FE --> HPO["tune_hyperparameters<br/>Optuna (TPE)"]
+        HPO --> TR["train<br/>RPC-Net"]
+        TR --> INF["inference<br/>causal decoding + FK"]
+    end
+    INF --> EV["4 - Evaluation<br/>MPCC, fingertip error, PCA"]
+```
+
+| Stage | What happens |
+|---|---|
+| **EMG acquisition** | The PC acts as a TCP server for the amplifier: 32 monopolar channels, 16-bit, 2 kHz, hardware high-pass. Samples are converted to µV and optionally filtered in real time with a stateful IIR bank (band-pass 10–450 Hz + 50 Hz notch harmonics). |
+| **Hand tracking** | MediaPipe Hand Landmarker extracts 21 metric 3D landmarks per frame, published on LSL with the capture timestamp. |
+| **Recording** | Both LSL streams are drained continuously and saved as time-aligned CSV pairs (`trial_N_EMG.csv`, `trial_N_Kinematics.csv`). |
+| **Kinematic modelling** | Savitzky–Golay smoothing → projection on a calibrated rigid skeleton with 1-DoF hinge constraints and soft range-of-motion limits (Stillfried et al.) → damped-least-squares inverse kinematics → 24 joint angles. |
+| **Features** | Zero-phase band-pass + notch filtering, rectification, RMS envelope (100 ms window, 12.5 ms step, ~80 Hz). Angles are rest-pose referenced and normalized to [0, 1]. |
+| **Model** | From a 0.8 s history: 16 × 32 EMG features (512) + 8 × 24 past angles (192) → 24 sub-networks → 24 joint angles. |
+| **Inference** | Autoregressive loop with causal low-pass smoothing; angles are mapped back to 3D landmarks with forward kinematics. |
+
+---
+
+## Results
+
+Evaluated on **three trials never seen during training**. Signals are time-aligned and the first 0.8 s (network warm-up) is excluded.
+
+| Test trial | MPCC (24 DoF) ↑ | Fingertip error, thumb/index/middle ↓ |
+|:---:|:---:|:---:|
+| Trial 6 | **76.5 %** | **23.1 mm** |
+| Trial 9 | 43.1 % | 29.4 mm |
+| Trial 15 | 28.7 % | 36.6 mm |
+
+- On trial 6 the best joints reach a Pearson correlation of **0.94** (ring PIP flexion), and the functional subset (wrist, thumb, index, middle) reaches **79.8 %**.
+- Accuracy changes a lot from one session to another. This is a well-known challenge for EMG decoders (electrode shift and impedance changes), and is the main direction for future work.
+- The first **2 principal components explain 84 %** of the kinematic variance. In this postural-synergy space the decoded gestures cluster around their ground truth:
+
+<p align="center">
+  <img src="results/figures/pca_postural_synergies_5b.png" width="60%" alt="Postural synergies in PCA space: ground truth vs RPC-Net">
+</p>
+
+More figures are in [`results/figures`](results/figures): IK validation, per-trial error over time, learning curve and PCA.
+An interactive 3D viewer for comparing ground-truth and predicted hands is in [`analysis/dashboard.html`](analysis/dashboard.html) (open it in a browser and drop in the CSV files).
+
+---
+
+## Repository structure
+
+```
+├── config.py                  # all paths, LSL stream names, train/val/test split
+├── acquisition/               # real-time hardware + streaming
+│   ├── sessantaquattro.py     #   TCP protocol of the EMG amplifier
+│   ├── emg_common.py          #   shared filters, plots and device connection
+│   ├── emg_stream_32ch.py     #   32-ch viewer + LSL outlet (used for recording)
+│   ├── emg_stream_8ch.py      #   8-ch viewer for quick electrode checks
+│   ├── hand_tracking_stream.py#   webcam + MediaPipe → LSL
+│   └── record_session.py      #   synchronized LSL recorder
+├── kinematics/
+│   ├── hand_kinematics.py     # calibration, rigid-skeleton preprocessing, FK and IK
+│   └── photo_calibration.py   # alternative calibration from one photo
+├── decoder/
+│   ├── rpc_net.py             # network architecture
+│   ├── feature_extraction.py  # trials → standardized tensors
+│   ├── tune_hyperparameters.py# Optuna search
+│   ├── train.py               # training with best-checkpoint saving
+│   ├── inference.py           # causal offline decoding + forward kinematics
+│   └── export_onnx.py         # ONNX export
+├── analysis/                  # evaluation, metrics, PCA, diagnostics, 3D animation, dashboard
+├── data/
+│   ├── recordings/            # 14 synchronized trials, ~21 min (Git LFS)
+│   ├── tensors/               # train / val / test tensors (Git LFS)
+│   ├── calibration/           # subject hand anatomy
+│   └── labels.json            # gesture annotations of the test trials
+├── models/                    # MediaPipe model, trained weights, ONNX, Optuna study
+├── results/                   # predictions, metrics and figures
+└── legacy/                    # earlier prototypes, kept for reference
+```
+
+---
+
+## Getting started
+
+### Installation
 
 ```bash
+git lfs install                       # recordings and tensors are stored with Git LFS
+git clone https://github.com/crupalolvov/NP_project.git
+cd NP_project
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**Nota sul modello di Visione:**
-Lo script di cinematica richiede il modello pre-addestrato di MediaPipe. È necessario scaricare il file `hand_landmarker.task` e posizionarlo nella root directory del progetto. 
-> 📥 Download hand_landmarker.task
+All scripts are run **from the repository root** as modules (`python -m package.script`). Every script accepts `--help`.
+
+### Reproduce the results (no hardware needed)
+
+```bash
+python -m decoder.feature_extraction       # recordings → tensors (+ IK if missing)
+python -m decoder.tune_hyperparameters     # optional: Optuna search (resumable)
+python -m decoder.train                    # train RPC-Net
+python -m decoder.inference --trial 6      # decode an unseen trial
+python -m analysis.evaluate                # MPCC + fingertip error on the test trials
+python -m analysis.metrics_report          # per-DoF metrics and tracking figures
+python -m analysis.synergy_pca             # postural-synergy analysis
+python -m analysis.animate_kinematics --trial 6   # 3D animation: raw vs IK vs predicted
+```
+
+The repository already contains the trained weights and the predictions, so the evaluation scripts work right after cloning.
+
+### Record a new session (hardware)
+
+Run each command in its own terminal:
+
+```bash
+python -m acquisition.emg_stream_32ch         # wait for the Sessantaquattro to connect (port 45454)
+python -m acquisition.hand_tracking_stream    # webcam window, add --camera N if needed
+python -m acquisition.record_session          # press R to start/stop a trial, Q to quit
+```
+
+New trials are saved in `data/recordings/` and numbered after the existing ones, so earlier recordings are never overwritten.
+EMG viewer shortcuts: `S` single-channel plots · `M` multiplot · `P` toggle filters · `R` quick CSV recording.
 
 ---
 
-## 🛠️ Guida all'Utilizzo
+## Data format
 
-Per registrare un trial di acquisizione (es. durante l'esecuzione di task motori o Activities of Daily Living - ADL), segui l'ordine di esecuzione corretto:
+| File | Columns |
+|---|---|
+| `trial_N_EMG.csv` | `Timestamp_LSL`, `EMG_1` … `EMG_32` (µV) |
+| `trial_N_Kinematics.csv` | `Timestamp_LSL`, `LM_0_X` … `LM_20_Z` (MediaPipe world landmarks, metres) |
+| `trial_N_Kinematics_preprocessed.csv` | same as above, after rigid-skeleton projection |
+| `trial_N_Kinematics_core_IKA_24DoF.csv` | `Timestamp_LSL`, `DoF_0` … `DoF_23` (degrees) |
+| `trial_N_EMG_RMS.csv` | `Timestamp_LSL`, `CH_0` … `CH_31` (normalized RMS envelope, ~80 Hz) |
 
-1. **Avviare il flusso HD-EMG:**
-   Assicurati che lo script di interfacciamento con il dispositivo EMG (es. `Read64_32ch.py`) sia attivo e stia streammando su LSL con il nome `OTB_S64_EMG`.
-   
-   > 💡 **Scorciatoie e Debug in `Read64_32ch.py`:**
-   > - **Tasto `P`**: Attiva o disattiva in tempo reale i filtri digitali (Preprocessing). All'avvio i filtri sono disattivati di default.
-   > - **Tasto `R`**: Avvia e ferma una registrazione diretta dei segnali EMG su file CSV locale. Utile per test rapidi o debug senza dover avviare l'intera pipeline di sincronizzazione LSL.
-
-2. **Avviare lo streaming Cinematico:**
-   ```bash
-   python kinematic_LSL.py
-   ```
-   *Si aprirà una finestra OpenCV per il feedback visivo. Verrà creato l'Outlet LSL `MediaPipe_Kinematics`.*
-
-3. **Avviare la registrazione dei dati:**
-   In un altro terminale, lancia il logger:
-   ```bash
-   python record_LSL.py
-   ```
-   Lo script cercherà automaticamente i due flussi nella rete locale. Una volta agganciati, è possibile avviare e fermare la registrazione premendo il tasto `R`. I dati verranno salvati al termine di ogni registrazione.
-
-4. **Addestramento del Modello e Inferenza:**
-   Una volta acquisiti i trial, è possibile procedere con l'addestramento della rete neurale.
-
-   a. **Generazione dei Tensori:**
-   Lancia lo script `feature_ext.py`. Questo script processerà tutti i trial nella cartella `recordings/`, eseguirà l'estrazione delle feature (RMS per EMG, IKA per cinematica), li dividerà in set di training, validazione e test, e salverà i tensori finali (`train_tensors.pt`, `val_tensors.pt`, `test_tensors.pt`).
-   ```bash
-   python feature_ext.py
-   ```
-
-   b. **(Opzionale) Ottimizzazione Iperparametri:**
-   Per trovare i migliori iperparametri per la rete, esegui `RPC_optuna.py`. Questo avvierà una ricerca Bayesiana e salverà la configurazione ottimale in `best_hyperparameters.json`.
-   ```bash
-   python RPC_optuna.py
-   ```
-
-   c. **Addestramento Rete:**
-   Avvia il training con `train_RPC.py`. Lo script caricherà automaticamente i tensori e gli iperparametri (se presenti) e salverà i pesi del modello migliore (`rpc_net_weights.pth`).
-   ```bash
-   python train_RPC.py
-   ```
-
-   d. **Esecuzione Inferenza Offline:**
-   Per testare il modello addestrato su un trial non visto (es. `trial_6`), modifica la variabile `TRIAL_TEST` in `inference.py` e lancialo. Lo script utilizzerà il file `_EMG_RMS.csv` (generato da `feature_ext.py`) per produrre le cinematiche predette. Questo genererà un file `_predicted_kinematics_lms.csv` che può essere visualizzato con `animate_raw_kinematics.py`.
-   ```bash
-   python inference.py
-   ```
+DoF layout: wrist (3) · thumb CMC flex/abd, MCP flex/abd, IP (5) · index, middle, ring and pinky MCP flex/abd, PIP, DIP (4 each).
+Data split: train trials 1–4, 7, 8, 10, 11, 13 · validation 5, 14 · test 6, 9, 15.
 
 ---
 
-## 📊 Struttura dei Dati Esportati
+## Tech stack
 
-Al termine della registrazione, lo script genererà due file per ogni trial:
+**Signal processing:** NumPy, SciPy (IIR/SOS filters, Welch PSD, Savitzky–Golay) ·
+**Machine learning:** PyTorch, Optuna, ONNX, scikit-learn ·
+**Computer vision:** MediaPipe, OpenCV ·
+**Real-time systems:** Lab Streaming Layer, raw TCP sockets, PyQt5 + pyqtgraph (multi-threaded GUI) ·
+**Robotics / biomechanics:** forward and inverse kinematics, damped least squares, Rodrigues rotations
 
-- `[prefisso]_EMG.csv`:
-  - `Timestamp_LSL`: Timestamp di rete ad alta precisione.
-  - `EMG_1` ... `EMG_32` (o fino a `EMG_64` in base alla configurazione hardware): Campioni elettromiografici in microVolt ($\mu V$).
+---
 
-- `[prefisso]_Kinematics.csv`:
-  - `Timestamp_LSL`: Timestamp di rete ad alta precisione.
-  - `LM_0_X`, `LM_0_Y`, `LM_0_Z` ... `LM_20_Z`: Coordinate spaziali **in metri** (world landmarks) per la ricostruzione topologica della mano (polso, nocche, falangi).
+## Team
 
-*Sviluppato per un progetto in ambito Neural Prostheses presso la Scuola Superiore Sant'Anna & Università di Pisa.*
-Supervisor: Prof. Silvestro Micera, Dr. Elena Losanno, Dr. Vincent Mendez
-PhD Co-supervisor: Firman Isma Serdana
+**Authors:** Michele Ivo Galella · Simona Frascella · Andrea Filippelli
 
-Alumni:
-Filippelli Andrea - Frascella Simona - Galella Michele Ivo 
+**Supervisor:** Prof. Silvestro Micera
+**Co-supervisors:** Dr. Elena Losanno, Dr. Vincent Mendez
+**PhD co-supervisor:** Firman Isma Serdana
+
+*Scuola Superiore Sant'Anna & University of Pisa: Neural Prostheses project.*
+
+## References
+
+- G. Rolandino, M. Gagliardi, T. Martins, G. L. Cerone, B. Andrews, J. J. FitzGerald, *"Developing RPC-Net: Leveraging High-Density Electromyography and Machine Learning for Improved Hand Position Estimation"*, IEEE Transactions on Biomedical Engineering, vol. 71, pp. 1617–1627, 2024. [doi:10.1109/TBME.2023.3346192](https://doi.org/10.1109/TBME.2023.3346192) · [arXiv:2505.14663](https://arxiv.org/abs/2505.14663)
+- Google MediaPipe [Hand Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker).
+- [Lab Streaming Layer](https://labstreaminglayer.org).
+- G. Stillfried et al., MRI-based skeletal hand movement model (joint range-of-motion limits).

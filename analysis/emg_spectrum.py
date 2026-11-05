@@ -1,130 +1,105 @@
-import pandas as pd
-import numpy as np
+"""Spectral analysis of EMG recordings: raw vs offline-filtered.
+
+For every CSV it computes the Welch PSD (each channel + channel average) and
+the channel-averaged spectrogram, before and after zero-phase filtering
+(band-pass 10-450 Hz + notches at 50 Hz and harmonics). Useful to inspect
+mains interference and to check that the notch filters work.
+
+Usage:
+    python -m analysis.emg_spectrum                       # trial 1
+    python -m analysis.emg_spectrum --files a.csv b.csv   # any EMG CSV
+"""
+import argparse
+from pathlib import Path
+
 import matplotlib.pyplot as plt
-from scipy.signal import welch, spectrogram, iirnotch, tf2sos, sosfiltfilt, butter
-import os
+import numpy as np
+import pandas as pd
+from scipy.signal import butter, iirnotch, sosfiltfilt, spectrogram, tf2sos, welch
+
+import config
+
+NOTCH_FREQS = (50, 100, 150, 200, 250)
+
+
+def offline_filter(raw, fs):
+    nyq = fs / 2
+    out = sosfiltfilt(butter(4, [10, min(450, nyq - 5)], btype="band", fs=fs, output="sos"), raw, axis=0)
+    for freq in NOTCH_FREQS:
+        if freq < nyq:
+            out = sosfiltfilt(tf2sos(*iirnotch(freq, 80, fs=fs)), out, axis=0)
+    return out
+
 
 def main():
-    file_paths = [
-        'session_EMG_IN_nofilt.csv',
-        'session_EMG_OUT_nofilt.csv'
-    ]
+    parser = argparse.ArgumentParser(description="PSD and spectrogram of EMG recordings.")
+    parser.add_argument("--files", nargs="+", type=Path, default=[config.trial_file(1, "EMG")])
+    parser.add_argument("--fs", type=int, default=config.EMG_FS)
+    parser.add_argument("--no-show", action="store_true", help="only save the figures")
+    args = parser.parse_args()
+    fs = args.fs
 
-    fs = 2000
-    print(f"Sampling frequency set to: {fs} Hz")
-
-    # Definizione e creazione della cartella di output
-    output_dir = "high_res_plots"
-    os.makedirs(output_dir, exist_ok=True)
-    print(f"I plot ad alta definizione verranno salvati in: {output_dir}/")
-
-    nyq = fs / 2
-    sos_band = butter(4, [10, min(450, nyq - 5)], btype='band', fs=fs, output='sos')
-    notches_freqs = [50, 100, 150, 200, 250]
+    output_dir = config.FIGURES_DIR / "emg_spectrum"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     datasets = []
-
-    for path in file_paths:
-        print(f"Loading data from {path}...")
+    for path in args.files:
+        print(f"Loading {path.name}...")
         df = pd.read_csv(path)
-        emg_cols = [col for col in df.columns if 'EMG' in col]
-        raw_data = df[emg_cols].to_numpy()
+        raw = df[[c for c in df.columns if "EMG" in c or "CH_" in c]].to_numpy()
+        datasets.append((f"Raw - {path.name}", raw))
+        datasets.append((f"Filtered - {path.name}", offline_filter(raw, fs)))
 
-        print(f"Applying offline filtering (Bandpass + Notches) for {path}...")
-        filtered_data = sosfiltfilt(sos_band, raw_data, axis=0)
-        
-        for freq in notches_freqs:
-            if freq < nyq:
-                b, a = iirnotch(freq, 80, fs=fs)
-                sos = tf2sos(b, a)
-                filtered_data = sosfiltfilt(sos, filtered_data, axis=0)
-
-        # Estraiamo solo il nome del file (senza il percorso) per il titolo dei plot
-        file_name = os.path.basename(path)
-        datasets.append((f"Raw - {file_name}", raw_data))
-        datasets.append((f"Filtered - {file_name}", filtered_data))
-
-    # Altezza dinamica: calcola circa 5 pollici per ogni subplot generato
+    # ---- Power spectral density ----
     fig1 = plt.figure(figsize=(15, 5 * len(datasets)))
-
     for i, (label, data) in enumerate(datasets):
-        print(f"Computing spectrum for {label}...")
+        print(f"PSD: {label}")
         psds = []
-
-        # Calculate PSD for each channel
-        for ch_idx in range(data.shape[1]):
-            freqs, psd = welch(data[:, ch_idx], fs=fs, nperseg=1024)
+        for ch in range(data.shape[1]):
+            freqs, psd = welch(data[:, ch], fs=fs, nperseg=1024)
             psds.append(psd)
-
-        avg_psd = np.mean(psds, axis=0)
-        
-        plt.subplot(len(datasets), 1, i+1)
-        
-        # Display individual channels in the background
+        plt.subplot(len(datasets), 1, i + 1)
         for psd in psds:
-            plt.semilogy(freqs, psd, color='gray', alpha=0.1)
-            
-        plt.semilogy(freqs, avg_psd, color='red' if i==0 else 'blue', linewidth=2, label=f'Average PSD ({label})')
-
-        plt.title(f'Spectral Analysis - {label}')
-        plt.xlabel('Frequency (Hz)')
-        plt.ylabel('PSD (uV^2/Hz)')
+            plt.semilogy(freqs, psd, color="gray", alpha=0.1)
+        plt.semilogy(freqs, np.mean(psds, axis=0), color="red" if i % 2 == 0 else "blue",
+                     linewidth=2, label=f"Average PSD ({label})")
+        plt.title(f"Spectral analysis - {label}")
+        plt.xlabel("Frequency (Hz)")
+        plt.ylabel("PSD (µV²/Hz)")
         plt.xlim(0, 500)
-        plt.grid(True, which='both', linestyle='--', alpha=0.7)
+        plt.grid(True, which="both", linestyle="--", alpha=0.7)
         plt.legend()
     plt.tight_layout()
+    fig1.savefig(output_dir / "psd_analysis.png", dpi=300, bbox_inches="tight")
 
-    # Salvataggio Figure 1
-    psd_filename = os.path.join(output_dir, 'psd_analysis.png')
-    fig1.savefig(psd_filename, dpi=300, bbox_inches='tight')
-    print(f"Salvato PSD plot: {psd_filename}")
-
-    # === SECOND FIGURE: SPECTROGRAMS OVER TIME ===
+    # ---- Spectrograms (shared colour scale) ----
     fig2 = plt.figure(figsize=(15, 5 * len(datasets)))
-    
-    spectrogram_data = []
-    global_vmin = np.inf
-    global_vmax = -np.inf
-
-    for i, (label, data) in enumerate(datasets):
-        print(f"Computing spectrogram for {label}...")
-        Sxx_list = []
-        # Calculate spectrogram for each channel
-        for ch_idx in range(data.shape[1]):
-            f, t, Sxx = spectrogram(data[:, ch_idx], fs=fs, nperseg=512, noverlap=256)
-            Sxx_list.append(Sxx)
-            
-        # Average the spectrograms to get an overview of activation
-        avg_Sxx = np.mean(Sxx_list, axis=0)
-        Sxx_db = 10 * np.log10(avg_Sxx + 1e-10)
-        
-        # Aggiorniamo il minimo e massimo globale per la scala dei colori
-        global_vmin = min(global_vmin, np.min(Sxx_db))
-        global_vmax = max(global_vmax, np.max(Sxx_db))
-        
-        spectrogram_data.append((label, f, t, Sxx_db))
-        
-    # Ora che conosciamo i limiti globali, generiamo i plot
-    for i, (label, f, t, Sxx_db) in enumerate(spectrogram_data):
-        plt.subplot(len(datasets), 1, i+1)
-        # Usiamo vmin e vmax per fissare la scala colori
-        pm = plt.pcolormesh(t, f, Sxx_db, shading='gouraud', cmap='viridis', vmin=global_vmin, vmax=global_vmax)
-        plt.colorbar(pm, label='Power (dB)')
-        
-        plt.ylim(0, 500) # Focus only on the 0-500 Hz range typical of EMG
-        plt.title(f'Average Spectrogram (32 channels) - {label}')
-        plt.ylabel('Frequency (Hz)')
-        if i == len(datasets) - 1:
-            plt.xlabel('Time (s)')
-
+    spectra = []
+    for label, data in datasets:
+        print(f"Spectrogram: {label}")
+        sxx = []
+        for ch in range(data.shape[1]):
+            f, t, s = spectrogram(data[:, ch], fs=fs, nperseg=512, noverlap=256)
+            sxx.append(s)
+        spectra.append((label, f, t, 10 * np.log10(np.mean(sxx, axis=0) + 1e-10)))
+    vmin = min(s[3].min() for s in spectra)
+    vmax = max(s[3].max() for s in spectra)
+    for i, (label, f, t, sxx_db) in enumerate(spectra):
+        plt.subplot(len(datasets), 1, i + 1)
+        pm = plt.pcolormesh(t, f, sxx_db, shading="gouraud", cmap="viridis", vmin=vmin, vmax=vmax)
+        plt.colorbar(pm, label="Power (dB)")
+        plt.ylim(0, 500)
+        plt.title(f"Average spectrogram ({datasets[i][1].shape[1]} channels) - {label}")
+        plt.ylabel("Frequency (Hz)")
+        if i == len(spectra) - 1:
+            plt.xlabel("Time (s)")
     plt.tight_layout()
+    fig2.savefig(output_dir / "spectrogram_analysis.png", dpi=300, bbox_inches="tight")
+    print(f"Figures saved to {config.rel(output_dir)}")
 
-    # Salvataggio Figure 2
-    spectro_filename = os.path.join(output_dir, 'spectrogram_analysis.png')
-    fig2.savefig(spectro_filename, dpi=300, bbox_inches='tight')
-    print(f"Salvato Spectrogram plot: {spectro_filename}")
+    if not args.no_show:
+        plt.show()
 
-    plt.show()
 
 if __name__ == "__main__":
     main()
